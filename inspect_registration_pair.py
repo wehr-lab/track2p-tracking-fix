@@ -1,0 +1,128 @@
+"""
+inspect_registration_pair.py
+
+Visual registration-quality check for a SPECIFIC (ref, mov) session pair --
+complements export_session_qc.py, which only shows each session's own raw
+mean image side by side and can't reveal a registration/alignment problem
+between two sessions that individually look fine (normal cell count, sharp
+image) but don't line up well against each other. That's exactly the
+signature BAD_NEIGHBOR_TRANSITIONS in screen_sessions.py is built to catch:
+a session whose own image quality is unremarkable, but whose IOU-based
+match rate to its immediate neighbors is anomalously low -- a mean-image
+side-by-side comparison legitimately cannot distinguish "this session's
+data is bad" from "this session's data is fine but doesn't REGISTER well
+against its neighbors" (FOV shift, rotation, focal-plane drift, etc.).
+This script checks the second possibility directly.
+
+Registers mov onto ref using the SAME elastix call track2p's own pipeline
+uses (track2p.register.elastix.reg_img_elastix, also used by
+fix1_gap_tolerant_chain.py's gap registrations) -- not a re-implementation,
+the literal same registration this session pair would get in a real run.
+Produces a 4-panel figure:
+  1. ref image (raw)
+  2. mov image (raw, BEFORE registration)
+  3. mov image (AFTER registration onto ref)
+  4. red/green overlay of ref (red) vs. registered mov (green) --
+     well-aligned structures appear yellow/white; misaligned structures
+     show up as separated red/green fringes, which is the fast visual
+     tell for a real registration failure vs. a merely-noisy image.
+
+Usage:
+    python inspect_registration_pair.py /path/to/track2p/save_path --ref 3 --mov 4
+    python inspect_registration_pair.py /path/to/track2p/save_path --ref 4 --mov 5 --plane 0
+
+Reuses track_ops.npy from save_path (all_ds_path, reg_chan, transform_type,
+etc.) so this registers with the exact same settings your real run used.
+
+IMPORTANT -- which track2p gets imported depends on where you run this
+from; see the same note in run_gap_tolerant.py. The sys.path.insert below
+forces the git clone to win regardless of cwd.
+"""
+
+import sys
+GIT_CLONE_PATH = '/Users/wehr/git/track2p'   # confirm with: python -c "import track2p; print(track2p.__file__)"
+sys.path.insert(0, GIT_CLONE_PATH)
+
+import os
+import argparse
+import numpy as np
+import matplotlib
+matplotlib.use('Agg')
+import matplotlib.pyplot as plt
+
+from track2p.ops.default import DefaultTrackOps
+from track2p.register.elastix import reg_img_elastix
+
+
+def _load_mean_img(ds_path, plane):
+    ops_path = os.path.join(ds_path, 'suite2p', f'plane{plane}', 'ops.npy')
+    ops = np.load(ops_path, allow_pickle=True).item()
+    return ops['meanImg'].astype(np.float64)
+
+
+def _norm01(img):
+    lo, hi = np.percentile(img, [1, 99])
+    if hi <= lo:
+        return np.zeros_like(img)
+    return np.clip((img - lo) / (hi - lo), 0, 1)
+
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument('save_path', help='track2p save_path containing track_ops.npy')
+    parser.add_argument('--ref', type=int, required=True, help='0-indexed reference session')
+    parser.add_argument('--mov', type=int, required=True, help='0-indexed moving session to register onto ref')
+    parser.add_argument('--plane', type=int, default=0)
+    parser.add_argument('--out', default=None, help='output PNG path (default: <save_path>/diagnostics/reg_check_<ref>_<mov>.png)')
+    args = parser.parse_args()
+
+    track_ops = DefaultTrackOps()
+    track_ops_dict = np.load(os.path.join(args.save_path, 'track_ops.npy'), allow_pickle=True).item()
+    track_ops.from_dict(track_ops_dict)
+    all_ds_path = track_ops.all_ds_path
+
+    ref_label = os.path.basename(os.path.normpath(all_ds_path[args.ref]))
+    mov_label = os.path.basename(os.path.normpath(all_ds_path[args.mov]))
+    print(f'Registering session {args.mov} ({mov_label}) onto session {args.ref} ({ref_label}), '
+          f'plane {args.plane}, using this run\'s actual track_ops settings...')
+
+    ref_img = _load_mean_img(all_ds_path[args.ref], args.plane)
+    mov_img = _load_mean_img(all_ds_path[args.mov], args.plane)
+
+    mov_img_reg, reg_params = reg_img_elastix(ref_img, mov_img, track_ops)
+
+    fig, axes = plt.subplots(1, 4, figsize=(24, 6))
+
+    axes[0].imshow(_norm01(ref_img), cmap='gray')
+    axes[0].set_title(f'ref: session {args.ref}\n({ref_label})')
+
+    axes[1].imshow(_norm01(mov_img), cmap='gray')
+    axes[1].set_title(f'mov (raw, BEFORE reg): session {args.mov}\n({mov_label})')
+
+    axes[2].imshow(_norm01(mov_img_reg), cmap='gray')
+    axes[2].set_title(f'mov (AFTER registration onto ref)')
+
+    overlay = np.zeros((*ref_img.shape, 3))
+    overlay[..., 0] = _norm01(ref_img)          # red = ref
+    overlay[..., 1] = _norm01(mov_img_reg)      # green = registered mov
+    axes[3].imshow(overlay)
+    axes[3].set_title('overlay: red=ref, green=registered mov\n(yellow/white = well aligned,\nred/green fringes = misaligned)')
+
+    for ax in axes:
+        ax.axis('off')
+
+    plt.tight_layout()
+
+    out_path = args.out if args.out is not None else os.path.join(
+        args.save_path, 'diagnostics', f'reg_check_{args.ref}_{args.mov}.png')
+    os.makedirs(os.path.dirname(out_path), exist_ok=True)
+    plt.savefig(out_path, dpi=150)
+    print(f'\nSaved {os.path.abspath(out_path)}')
+    print('Look at the overlay panel: consistent red/green fringing around cell bodies/vasculature')
+    print('means registration genuinely failed for this pair (FOV shift, rotation, focal-plane drift,')
+    print('etc. that this transform couldn\'t correct) -- not just noisy/dim data, which the mean-image')
+    print('side-by-side view from export_session_qc.py already ruled out for you.')
+
+
+if __name__ == '__main__':
+    main()
