@@ -28,18 +28,22 @@ SETTINGS_SOURCE_PATH = None
 # Chaining onto a PREVIOUS track2p run's already-once-excluded list instead
 # (what's used below -- this is round 2, excluding a second session from
 # round 1's output):
-ALL_DS_PATH = load_all_ds_path(
-    '/Users/wehr/Documents/Projects/Representational drift/wehr5336/track2p_1-18gap3-skip/track2p'
-)
+# ALL_DS_PATH = load_all_ds_path(    '/Users/wehr/Documents/Projects/Representational drift/wehr5336/track2p_1-18gap3-skip/track2p')
 
 # Where to write this run's output. Give this a NEW directory -- run_t2p()
 # appends its own 'track2p/' subfolder onto whatever save_path you give it,
 # so reusing SETTINGS_SOURCE_PATH's parent would land back on it and
 # overwrite your original results.
-NEW_BASE_PATH = '/Users/wehr/Documents/Projects/Representational drift/wehr5336/track2p_1-18gap3-skip2'
+# NEW_BASE_PATH = '/Users/wehr/Documents/Projects/Representational drift/wehr5336/track2p_1-18gap3-skip2'
 
 # Which session to drop. Matched by substring against the session folder
 # name (safer than a hardcoded index, since it fails loudly if the string
 # doesn't match exactly one session instead of silently dropping the wrong
 # one) -- e.g. the date you identified visually.
-EXCLUDE_MATCH = '02-24-26'
+# EXCLUDE_MATCH = '02-24-26'
+
+ALL_DS_PATH = load_all_ds_path(
+    '/Users/wehr/Documents/Projects/Representational drift/wehr5336/track2p_1-18gap3-skip2/track2p'
+)
+NEW_BASE_PATH = '/Users/wehr/Documents/Projects/Representational drift/wehr5336/track2p_1-18gap3-skip3'
+EXCLUDE_MATCH = '12-09-25'
