@@ -71,6 +71,7 @@ chain, so runtime grows with how bad the dropout is, which is exactly the
 """
 
 import os
+import time
 from concurrent.futures import ProcessPoolExecutor, as_completed
 import numpy as np
 from skimage.filters import threshold_otsu, threshold_minimum
@@ -402,8 +403,18 @@ def run_t2p_gap_tolerant(track_ops, max_gap=3, n_workers=1):
     SCRIPT calling this must guard its own top-level code behind
     `if __name__ == '__main__':` on macOS, or every worker process will
     re-run that entire script from scratch).
+
+    Prints wall-clock timing for the run as a whole plus a breakdown of the
+    two phases that matter for judging N_WORKERS: the parallel precompute
+    step (the only phase N_WORKERS actually affects) and the chaining step
+    (fast once the gap cache is warm, regardless of N_WORKERS, since it's
+    then just cache lookups + assignment logic, no elastix calls) -- so a
+    N_WORKERS=1 vs. N_WORKERS>1 run on the same session list gives you a
+    real speedup number instead of having to watch the clock yourself.
     """
     from track2p.t2p import generate_suite2p_indices, save_in_s2p_format
+
+    run_start = time.monotonic()
 
     track_ops.init_save_paths()
     check_nplanes(track_ops)
@@ -439,15 +450,24 @@ def run_t2p_gap_tolerant(track_ops, max_gap=3, n_workers=1):
     plot_thr_met_hist(all_ds_thr_met, all_ds_thr, track_ops)
     plot_n_matched_roi(all_ds_thr_met, all_ds_thr, track_ops)
 
+    precompute_elapsed = None
     if n_workers > 1:
         print(f'\n[gap] precomputing the full bounded gap-pair universe in parallel '
               f'({n_workers} workers) before chaining...')
+        precompute_start = time.monotonic()
         precompute_gap_pairs_parallel(all_ds_all_roi_ref, all_ds_all_roi_mov, track_ops,
                                        max_gap=max_gap, n_workers=n_workers)
+        precompute_elapsed = time.monotonic() - precompute_start
+        print(f'[gap] parallel precompute finished in {precompute_elapsed:.1f}s '
+              f'({n_workers} workers, max_gap={max_gap})')
 
     # *** fix #1: gap-tolerant chaining in place of get_all_pl_match_mat ***
+    chain_start = time.monotonic()
     all_pl_match_mat, gap_assign_cache = get_all_pl_match_mat_gap(
         all_ds_all_roi_ref, all_ds_all_roi_mov, all_ds_assign_thr, track_ops, max_gap=max_gap)
+    chain_elapsed = time.monotonic() - chain_start
+    print(f'[gap] chaining step finished in {chain_elapsed:.1f}s '
+          f'({"warm cache from precompute above" if precompute_elapsed is not None else "lazy, sequential gap registration as needed"})')
 
     save_track_ops(track_ops)
     save_match_diagnostics(all_ds_thr_met, all_ds_thr, track_ops)
@@ -478,6 +498,15 @@ def run_t2p_gap_tolerant(track_ops, max_gap=3, n_workers=1):
     print(f'\nGap-tolerant run complete (max_gap={max_gap}): '
           f'{len(gap_assign_cache)} extra non-adjacent session pairs registered on demand '
           f'(out of up to {sum(min(max_gap, len(track_ops.all_ds_path) - 1 - i) - 1 for i in range(len(track_ops.all_ds_path) - 1))} possible).')
+
+    total_elapsed = time.monotonic() - run_start
+    print(f'\n[timing] total run_t2p_gap_tolerant wall time: {total_elapsed / 60:.1f} min '
+          f'({total_elapsed:.0f}s), n_workers={n_workers}, max_gap={max_gap}')
+    if precompute_elapsed is not None:
+        print(f'[timing]   of which parallel precompute: {precompute_elapsed / 60:.1f} min '
+              f'({precompute_elapsed:.0f}s) -- this is the phase N_WORKERS actually speeds up')
+    print(f'[timing]   of which chaining: {chain_elapsed / 60:.1f} min ({chain_elapsed:.0f}s)')
+
     print('Done!\n')
 
     return all_pl_match_mat
