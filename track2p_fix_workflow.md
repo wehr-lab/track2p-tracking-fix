@@ -52,9 +52,11 @@ All signals from `screen_sessions.py` are available immediately after step 0 (ce
 ## 2. Visually confirm suspects
 
 ```
-python export_session_qc.py <save_path>
+python compare_session_qc.py <save_path>
 ```
-then open `session_qc.mat` in MATLAB with `compare_session_qc.m`. Never exclude a session on the numeric flags alone — confirm the mean image actually looks degraded, or the cell count is genuinely low relative to neighbors, not just statistically unusual.
+This writes `session_qc_images.png` (mean image per session, 1st-99th percentile contrast) and `session_qc_counts.png` (iscell count bar chart, sessions below 50% of the group median highlighted in red) into `<save_path>/diagnostics/`. Pass `--sessions` to restrict the image panel to specific sessions (0-indexed integers and/or date/substrings, same convention as `inspect_registration_pair.py`) — the count chart always covers every session regardless. Never exclude a session on the numeric flags alone — confirm the mean image actually looks degraded, or the cell count is genuinely low relative to neighbors, not just statistically unusual.
+
+(`export_session_qc.py` + `compare_session_qc.m` still work if you'd rather do this step in MATLAB — `compare_session_qc.py` reads the same suite2p output directly instead of round-tripping through a `.mat` file, but the two checks are the same.)
 
 **If `registration_quality_scan.py` flagged a pair, also run `inspect_registration_pair.py` on it before deciding anything.** `export_session_qc.py` only shows each session's own raw mean image side by side, which cannot reveal a registration/alignment problem — a session can look completely normal in isolation (fine cell count, sharp image) while genuinely failing to register against its neighbor. This has gone both directions in practice: it's caught a session that looked fine in isolation but had a real alignment failure, and it's the only thing that can confirm (or rule out) a flag from `registration_quality_scan.py`, whose absolute SSIM values aren't yet well-calibrated enough to trust without a visual check.
 

@@ -1,6 +1,12 @@
 """
 export_session_qc.py
 
+LEGACY / OPTIONAL: the standard path for this QC step is now
+compare_session_qc.py, which reads suite2p output directly and writes PNGs
+-- no MATLAB needed. Keep using this + compare_session_qc.m if you'd rather
+do the visual check in MATLAB; both paths check the same two things (mean
+images side by side, iscell count bar chart).
+
 Exports just enough from your suite2p sessions for a MATLAB-side visual QC
 check, since ops.npy is a pickled Python dict (saved with allow_pickle=True)
 and MATLAB's usual .npy readers can't parse pickled objects -- only plain
@@ -95,6 +101,7 @@ def main():
         'all_labels': np.array(all_labels, dtype=object),
     })
     print(f'\nSaved {os.path.abspath(out_path)} -- load this in MATLAB with compare_session_qc.m')
+    print('(Or skip the MATLAB round trip entirely: python compare_session_qc.py reads the same data directly.)')
 
 
 if __name__ == '__main__':

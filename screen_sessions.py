@@ -9,9 +9,8 @@ ranked suspect table instead of requiring you to eyeball every session's
 mean image by hand.
 
 TREAT THIS AS TRIAGE, NOT A VERDICT: always visually confirm (via
-export_session_qc.py / compare_session_qc.m) before excluding anything it
-flags. A flag can be genuine biology (fewer active cells that day), not
-necessarily bad data.
+compare_session_qc.py) before excluding anything it flags. A flag can be
+genuine biology (fewer active cells that day), not necessarily bad data.
 
 Two signal types, checked independently:
 
@@ -181,7 +180,7 @@ def main():
         for s, label, flags in suspects:
             print(f'  session {s} ({label}): {", ".join(flags)}')
         print('\nThese are triage candidates, not verdicts -- confirm visually with '
-              'export_session_qc.py / compare_session_qc.m before excluding anything.')
+              'compare_session_qc.py before excluding anything.')
     else:
         print('No sessions flagged by these criteria.')
 
