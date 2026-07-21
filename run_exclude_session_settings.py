@@ -42,8 +42,14 @@ SETTINGS_SOURCE_PATH = None
 # one) -- e.g. the date you identified visually.
 # EXCLUDE_MATCH = '02-24-26'
 
+# ALL_DS_PATH = load_all_ds_path(
+#     '/Users/wehr/Documents/Projects/Representational drift/wehr5336/track2p_1-18gap3-skip2/track2p'
+# )
+# NEW_BASE_PATH = '/Users/wehr/Documents/Projects/Representational drift/wehr5336/track2p_1-18gap3-skip3'
+# EXCLUDE_MATCH = '12-09-25'
+
 ALL_DS_PATH = load_all_ds_path(
-    '/Users/wehr/Documents/Projects/Representational drift/wehr5336/track2p_1-18gap3-skip2/track2p'
+    '/Users/wehr/Documents/Projects/Representational drift/wehr5336/track2p_1-18gap3-skip3/track2p'
 )
-NEW_BASE_PATH = '/Users/wehr/Documents/Projects/Representational drift/wehr5336/track2p_1-18gap3-skip3'
-EXCLUDE_MATCH = '12-09-25'
+NEW_BASE_PATH = '/Users/wehr/Documents/Projects/Representational drift/wehr5336/track2p_1-18gap3-skip4'
+EXCLUDE_MATCH = '11-13-25'

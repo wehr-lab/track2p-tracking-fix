@@ -4,6 +4,33 @@ Running log of work sessions on the track2p tracking-fix project. Newest entries
 
 ---
 
+## 2026-07-21
+
+### Round 3 exclusion (session 4 / 12-09-25) -- real, partial win
+
+- Ran `run_exclude_session.py` (settings already configured from yesterday) -> `track2p_1-18gap3-skip3` (15 sessions), then `run_gap_tolerant.py` (`MAX_GAP=3`, `N_WORKERS=6` -- first real use of the parallel precompute feature) -> `track2p_1-18gap3-skip3_2`.
+- Strict-AND went from 0 (16 sessions) to 6 (15 sessions) -- a genuine, concrete win, not just noise. K-based recovery curve also shifted up substantially across the board (K=8: 103 -> 168 cells; K=14 now recommended, 18 cells).
+- BUT: yesterday's read of session 5 (`12-16-25`) as pure fallout from session 4 was wrong. After excluding session 4, `12-16-25`'s dominant-missing percentage went UP (59.9% -> 64.5%), not down -- real evidence it has its own independent problem, not inherited from session 4.
+
+### New finding: session 0->1 (`11-13-25` -> `11-18-25`) is genuinely, badly misregistered
+
+- Built `registration_quality_scan.py` (batch SSIM across every consecutive pair, robust z-score flagging) after the user rightly pushed back on "eyeballing red/green vs. one control pair" as too subjective.
+- First version (whole-image SSIM) flagged pair 0->1 as the worst in the entire list, with a wildly negative z-score and no corroboration anywhere else (never flagged by `screen_sessions.py`, normal cell counts/sharpness/neighbor-rate every run). Assumed this was a metric artifact (SSIM dominated by independent background noise in sparse two-photon images) and shipped a masked-SSIM fix (`registration_qc_utils.py`, restricts scoring to the ref image's brightest 20% of pixels) to address it.
+- Masking did NOT fix it -- score got worse (0.161 -> 0.041), and the rest of the list still didn't show a clean separation. My synthetic validation test was too clean (toy images, not representative of real 2p mean image statistics) to have actually confirmed the fix would generalize.
+- Asked the user to check the actual overlay from `inspect_registration_pair.py --ref 0 --mov 1` as ground truth, independent of the metric. **Confirmed visually: "all red and green, almost no overlap."** The flag was real. I was wrong to be skeptical of it just because it lacked corroboration from `screen_sessions.py`.
+- Why `screen_sessions.py` missed this: its neighbor-rate signal comes from Otsu thresholding applied per-pair, adaptively -- it just finds *a* locally-separable split in whatever IOU distribution it's given, with no absolute reference for what a real match looks like. A uniformly bad registration can still produce a plausible-looking match rate (session 0/1 both read totally normal, ~48-56%) if Otsu finds *some* threshold, even when the underlying "matches" are essentially noise.
+- **Why this matters more than session 4:** session 0 is the anchor for literally every tracked row in the whole pipeline (everything starts there by construction). If this transition is fundamentally broken, it's plausibly a significant piece of why yield has looked bad from the very first 9-session vanilla baseline (6 cells), before any of this troubleshooting started -- not just "one more bad session," but a compromised foundation the entire chain sits on.
+- `track2p_fix_workflow.md` updated: `registration_quality_scan.py` promoted to a standard step-1 screening tool (not just reactive), and step 2 now explicitly calls out that `export_session_qc.py` cannot reveal alignment problems -- `inspect_registration_pair.py` is required to confirm or rule out anything `registration_quality_scan.py` flags.
+
+## Where to pick up
+
+1. Run `inspect_registration_pair.py --ref 1 --mov 2` to isolate whether the problem is specific to session 0 itself, or to that particular pairing. If 1->2 looks clean, investigate session 0's data specifically (different acquisition settings? wrong FOV? possibly a mapping-day session that slipped past the date-based exclusion logic despite looking normal on cell count/sharpness alone?).
+2. Depending on what that shows, likely next move is excluding session 0 (or whatever the real culprit turns out to be) and re-running the pipeline -- this could be a bigger yield unlock than session 4 was, given how foundational the affected transition is.
+3. Still need to resolve `12-16-25` (now confirmed independent, not fallout) -- was mid-investigation via `registration_quality_scan.py` before this session-0 finding took priority.
+4. Once session ordering/exclusion settles, re-run `screen_sessions.py` + `registration_quality_scan.py` together from now on (both, always -- see workflow doc) before trusting a "clean" result from either alone.
+
+---
+
 ## 2026-07-20
 
 ### Repo restructuring

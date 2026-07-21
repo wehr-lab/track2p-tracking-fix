@@ -42,9 +42,12 @@ Note the strict-AND yield it reports. This is your baseline, and it will look ba
 
 ```
 python screen_sessions.py <save_path>
+python registration_quality_scan.py <save_path>
 ```
 
-All signals are available immediately after step 0 (cell count, image sharpness, neighbor-transition match rate, dominant-missing-session all read from files already on disk). Look for sessions flagged with more than one criterion, especially `BAD_NEIGHBOR_TRANSITIONS` — that's the more specific fingerprint. A lone `DOMINANT_MISSING_SESSION` flag can just be downstream fallout from a different session breaking the chain (this happened with session 8 before session 7 was excluded).
+All signals from `screen_sessions.py` are available immediately after step 0 (cell count, image sharpness, neighbor-transition match rate, dominant-missing-session all read from files already on disk). Look for sessions flagged with more than one criterion, especially `BAD_NEIGHBOR_TRANSITIONS` — that's the more specific fingerprint. A lone `DOMINANT_MISSING_SESSION` flag can just be downstream fallout from a different session breaking the chain (this happened with session 8 before session 7 was excluded).
+
+**Run `registration_quality_scan.py` every time too, not just when something's already flagged.** It measures something `screen_sessions.py`'s neighbor rate structurally cannot: neighbor rate comes from Otsu thresholding applied per-pair, which just finds *a* locally-separable split in that pair's IOU distribution — it has no absolute reference for what a real match looks like, so a uniformly bad registration can still produce a plausible-looking match rate if Otsu finds *some* threshold, even when the "matches" are essentially noise. This is exactly how a genuinely broken transition (near-zero image-level overlap, confirmed visually) slipped past `screen_sessions.py` entirely on a real run, while `registration_quality_scan.py`'s SSIM score caught it. The two tools are checking different things and neither subsumes the other — always run both.
 
 ## 2. Visually confirm suspects
 
@@ -52,6 +55,8 @@ All signals are available immediately after step 0 (cell count, image sharpness,
 python export_session_qc.py <save_path>
 ```
 then open `session_qc.mat` in MATLAB with `compare_session_qc.m`. Never exclude a session on the numeric flags alone — confirm the mean image actually looks degraded, or the cell count is genuinely low relative to neighbors, not just statistically unusual.
+
+**If `registration_quality_scan.py` flagged a pair, also run `inspect_registration_pair.py` on it before deciding anything.** `export_session_qc.py` only shows each session's own raw mean image side by side, which cannot reveal a registration/alignment problem — a session can look completely normal in isolation (fine cell count, sharp image) while genuinely failing to register against its neighbor. This has gone both directions in practice: it's caught a session that looked fine in isolation but had a real alignment failure, and it's the only thing that can confirm (or rule out) a flag from `registration_quality_scan.py`, whose absolute SSIM values aren't yet well-calibrated enough to trust without a visual check.
 
 ## 3. Exclude confirmed bad sessions, one at a time
 

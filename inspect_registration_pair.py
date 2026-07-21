@@ -62,19 +62,7 @@ import matplotlib.pyplot as plt
 
 from track2p.ops.default import DefaultTrackOps
 from track2p.register.elastix import reg_img_elastix
-
-
-def _load_mean_img(ds_path, plane):
-    ops_path = os.path.join(ds_path, 'suite2p', f'plane{plane}', 'ops.npy')
-    ops = np.load(ops_path, allow_pickle=True).item()
-    return ops['meanImg'].astype(np.float64)
-
-
-def _norm01(img):
-    lo, hi = np.percentile(img, [1, 99])
-    if hi <= lo:
-        return np.zeros_like(img)
-    return np.clip((img - lo) / (hi - lo), 0, 1)
+from registration_qc_utils import load_mean_img as _load_mean_img, norm01 as _norm01, signal_mask, masked_ssim
 
 
 def _resolve_session(all_ds_path, spec, arg_name):
@@ -130,6 +118,20 @@ def main():
 
     mov_img_reg, reg_params = reg_img_elastix(ref_img, mov_img, track_ops)
 
+    # Quantitative alignment score, not just a visual impression -- SSIM (structural
+    # similarity) between the normalized ref image and the normalized registered mov
+    # image. 1.0 = identical; this measures IMAGE-level alignment directly, independent
+    # of the downstream IOU/ROI-matching numbers screen_sessions.py already reports.
+    # A single score means little in isolation -- run registration_quality_scan.py for
+    # the full-list distribution of every consecutive pair to judge this number against,
+    # rather than eyeballing it next to one anecdotal "control" pair.
+    ref_n = _norm01(ref_img)
+    mov_reg_n = _norm01(mov_img_reg)
+    mask = signal_mask(ref_img)
+    score = masked_ssim(ref_n, mov_reg_n, mask)
+    print(f'Structural similarity (SSIM, masked to ref\'s brightest 20% of pixels -- see '
+          f'registration_qc_utils.py for why): {score:.3f}')
+
     fig, axes = plt.subplots(1, 4, figsize=(24, 6))
 
     axes[0].imshow(_norm01(ref_img), cmap='gray')
@@ -142,10 +144,10 @@ def main():
     axes[2].set_title(f'mov (AFTER registration onto ref)')
 
     overlay = np.zeros((*ref_img.shape, 3))
-    overlay[..., 0] = _norm01(ref_img)          # red = ref
-    overlay[..., 1] = _norm01(mov_img_reg)      # green = registered mov
+    overlay[..., 0] = ref_n          # red = ref
+    overlay[..., 1] = mov_reg_n      # green = registered mov
     axes[3].imshow(overlay)
-    axes[3].set_title('overlay: red=ref, green=registered mov\n(yellow/white = well aligned,\nred/green fringes = misaligned)')
+    axes[3].set_title(f'overlay: red=ref, green=registered mov (SSIM={score:.3f})\n(yellow/white = well aligned,\nred/green fringes = misaligned)')
 
     for ax in axes:
         ax.axis('off')
@@ -161,6 +163,8 @@ def main():
     print('means registration genuinely failed for this pair (FOV shift, rotation, focal-plane drift,')
     print('etc. that this transform couldn\'t correct) -- not just noisy/dim data, which the mean-image')
     print('side-by-side view from export_session_qc.py already ruled out for you.')
+    print(f'\nSSIM={score:.3f} -- compare against registration_quality_scan.py\'s full-list distribution')
+    print('rather than a single anecdotal control pair to judge whether this is actually low.')
 
 
 if __name__ == '__main__':
