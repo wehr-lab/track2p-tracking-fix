@@ -93,11 +93,31 @@ def analyze_partial_tracks(match_mat, min_k_frac=0.5):
     # default K: largest K giving >=2x strict-AND recovery, else fall back
     # to k = n_sessions - 1 (miss at most one session) if that alone clears
     # the 2x bar isn't met anywhere, else just n_sessions-1 as a mild default
+    # default K: largest K giving >=2x strict-AND recovery. When strict-AND
+    # is 0 (common at higher session counts -- see p^(N-1) decay), there's
+    # no baseline to double, so instead recommend the largest K that
+    # recovers at least half of what the loosest allowed K (k_min) recovers
+    # -- same "meaningful fraction of achievable recovery" spirit, just
+    # anchored to a non-degenerate baseline. Note recovery[0] is the
+    # strict-AND (K=n_sessions) entry itself and always has n_cells ==
+    # n_strict_and, so it must never be allowed to satisfy either
+    # threshold trivially (that was the bug: when n_strict_and == 0, the
+    # old `n_strict_and == 0 or ...` condition was already true on this
+    # very first entry, immediately locking in K=n_sessions with 0 cells
+    # as the "recommendation").
     recommended_k = None
-    for entry in recovery:
-        if n_strict_and == 0 or entry['n_cells'] >= 2 * n_strict_and:
-            recommended_k = entry['k']
-            break
+    if n_strict_and > 0:
+        for entry in recovery:
+            if entry['n_cells'] >= 2 * n_strict_and:
+                recommended_k = entry['k']
+                break
+    else:
+        loosest_count = recovery[-1]['n_cells']  # count at k_min
+        if loosest_count > 0:
+            for entry in recovery:
+                if entry['n_cells'] >= 0.5 * loosest_count:
+                    recommended_k = entry['k']
+                    break
     if recommended_k is None:
         recommended_k = max(k_min, n_sessions - 1)
 
