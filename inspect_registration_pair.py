@@ -29,7 +29,17 @@ Produces a 4-panel figure:
 
 Usage:
     python inspect_registration_pair.py /path/to/track2p/save_path --ref 3 --mov 4
-    python inspect_registration_pair.py /path/to/track2p/save_path --ref 4 --mov 5 --plane 0
+    python inspect_registration_pair.py /path/to/track2p/save_path --ref 12-02-25 --mov 12-16-25
+
+--ref/--mov each accept EITHER a plain 0-indexed integer OR a date/substring
+uniquely identifying a session folder (same substring-match convention as
+EXCLUDE_MATCH in run_exclude_session.py). Prefer the date form whenever
+session indices might have shifted since you last looked -- e.g. right
+after an exclusion round, session N's index isn't the same list position it
+used to be, and a numeric --ref/--mov silently points at whatever session
+now happens to sit at that position instead of failing loudly. A date
+string can't be mistaken for an index (it isn't a valid int), so there's no
+ambiguity in mixing the two forms across --ref/--mov in the same call.
 
 Reuses track_ops.npy from save_path (all_ds_path, reg_chan, transform_type,
 etc.) so this registers with the exact same settings your real run used.
@@ -67,11 +77,37 @@ def _norm01(img):
     return np.clip((img - lo) / (hi - lo), 0, 1)
 
 
+def _resolve_session(all_ds_path, spec, arg_name):
+    """Resolve a --ref/--mov value to a 0-indexed session position. Accepts
+    either a plain integer (treated as the index directly) or a
+    date/substring matched against session folder names (same convention as
+    EXCLUDE_MATCH in run_exclude_session.py) -- fails loudly if a substring
+    doesn't match exactly one session, rather than silently picking the
+    wrong one the way a stale numeric index would."""
+    try:
+        return int(spec)
+    except ValueError:
+        pass  # not a plain int -- fall through to substring match
+
+    matches = [i for i, p in enumerate(all_ds_path) if spec in os.path.basename(os.path.normpath(p))]
+    if len(matches) != 1:
+        raise ValueError(
+            f"--{arg_name}='{spec}' matched {len(matches)} session(s) by substring, expected exactly 1: "
+            f"{[os.path.basename(os.path.normpath(all_ds_path[i])) for i in matches]}\n"
+            f"Use a more specific date/substring, or the numeric 0-indexed position instead."
+        )
+    return matches[0]
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('save_path', help='track2p save_path containing track_ops.npy')
-    parser.add_argument('--ref', type=int, required=True, help='0-indexed reference session')
-    parser.add_argument('--mov', type=int, required=True, help='0-indexed moving session to register onto ref')
+    parser.add_argument('--ref', required=True,
+                         help='reference session -- 0-indexed integer, OR a date/substring '
+                              'uniquely identifying it (e.g. "12-16-25")')
+    parser.add_argument('--mov', required=True,
+                         help='moving session to register onto ref -- 0-indexed integer, OR a '
+                              'date/substring uniquely identifying it')
     parser.add_argument('--plane', type=int, default=0)
     parser.add_argument('--out', default=None, help='output PNG path (default: <save_path>/diagnostics/reg_check_<ref>_<mov>.png)')
     args = parser.parse_args()
@@ -81,23 +117,26 @@ def main():
     track_ops.from_dict(track_ops_dict)
     all_ds_path = track_ops.all_ds_path
 
-    ref_label = os.path.basename(os.path.normpath(all_ds_path[args.ref]))
-    mov_label = os.path.basename(os.path.normpath(all_ds_path[args.mov]))
-    print(f'Registering session {args.mov} ({mov_label}) onto session {args.ref} ({ref_label}), '
+    ref_idx = _resolve_session(all_ds_path, args.ref, 'ref')
+    mov_idx = _resolve_session(all_ds_path, args.mov, 'mov')
+
+    ref_label = os.path.basename(os.path.normpath(all_ds_path[ref_idx]))
+    mov_label = os.path.basename(os.path.normpath(all_ds_path[mov_idx]))
+    print(f'Registering session {mov_idx} ({mov_label}) onto session {ref_idx} ({ref_label}), '
           f'plane {args.plane}, using this run\'s actual track_ops settings...')
 
-    ref_img = _load_mean_img(all_ds_path[args.ref], args.plane)
-    mov_img = _load_mean_img(all_ds_path[args.mov], args.plane)
+    ref_img = _load_mean_img(all_ds_path[ref_idx], args.plane)
+    mov_img = _load_mean_img(all_ds_path[mov_idx], args.plane)
 
     mov_img_reg, reg_params = reg_img_elastix(ref_img, mov_img, track_ops)
 
     fig, axes = plt.subplots(1, 4, figsize=(24, 6))
 
     axes[0].imshow(_norm01(ref_img), cmap='gray')
-    axes[0].set_title(f'ref: session {args.ref}\n({ref_label})')
+    axes[0].set_title(f'ref: session {ref_idx}\n({ref_label})')
 
     axes[1].imshow(_norm01(mov_img), cmap='gray')
-    axes[1].set_title(f'mov (raw, BEFORE reg): session {args.mov}\n({mov_label})')
+    axes[1].set_title(f'mov (raw, BEFORE reg): session {mov_idx}\n({mov_label})')
 
     axes[2].imshow(_norm01(mov_img_reg), cmap='gray')
     axes[2].set_title(f'mov (AFTER registration onto ref)')
@@ -114,7 +153,7 @@ def main():
     plt.tight_layout()
 
     out_path = args.out if args.out is not None else os.path.join(
-        args.save_path, 'diagnostics', f'reg_check_{args.ref}_{args.mov}.png')
+        args.save_path, 'diagnostics', f'reg_check_{ref_idx}_{mov_idx}.png')
     os.makedirs(os.path.dirname(out_path), exist_ok=True)
     plt.savefig(out_path, dpi=150)
     print(f'\nSaved {os.path.abspath(out_path)}')
