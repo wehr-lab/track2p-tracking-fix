@@ -49,12 +49,19 @@ Running log of work sessions on the track2p tracking-fix project. Newest entries
 - `fix3_partial_tracks.py` on `skip5_2` (final result for this checkpoint): strict-AND **14** (up from the original 9-session baseline's 6 -- and on 13 sessions instead of 9, which counts for more given the p^(N-1) decay). K-based recovery: K=12 (1 session allowed missing) -> 45 cells, K=11 -> 102, K=10 -> 158, K=9 -> 206, K=8 -> 259, K=7 -> 297. `recommended_k` = 12.
   - First upload of this JSON was accidentally the stale original 9-session baseline (strict-AND 6, n_sessions 9) -- caught because the numbers didn't match `compare_gap_vs_vanilla.py`'s already-known strict-AND-14/13-session result. Re-run against the correct `skip5_2` path confirmed the real number above.
 
+### `MAX_GAP=6` run (`track2p_1-18gap3-skip5_gap6`) -- real gain at looser K
+
+- Ran before pausing: `MAX_GAP=6` (vs. the day's `MAX_GAP=3`) gap-tolerant chaining on the same cleaned 13-session list.
+- `compare_gap_vs_vanilla.py`: 442 rows gained sessions (up from 342 at `MAX_GAP=3`). Still 0/9 near-misses rescued, still all missing exactly `03-10-26` -- confirms again that's a hard structural limit, not something any `max_gap` fixes.
+- `fix3_partial_tracks.py` K-curve vs. `MAX_GAP=3`: K=13/12/11 identical (14 / 45 / 102) -- rows missing only 1-2 sessions already had a gap small enough for `max_gap=3` to bridge, so a bigger cap adds nothing there. Real gains show up at K=10 and looser: K=10 158->161, K=9 206->222, K=8 259->295, K=7 297->353 (+19%).
+- **Practical takeaway: use `skip5_gap6`'s output if downstream analysis can tolerate K=7-10 (54-77% of sessions); `skip5_2`'s `MAX_GAP=3` output is equally good (and cheaper to have produced) for K=11+.**
+
 ## Where to pick up tomorrow
 
-1. Closing verification per the stopping rule from round 4/5: re-run `screen_sessions.py` + `registration_quality_scan.py` fresh on `skip5_2` to confirm nothing new shows up now that `12-16-25` is gone. Expect clean, but confirm rather than assume.
-2. (Optional) `estimate_fix2_ceiling.py` on `skip5_2` -- worth checking now that the list is clean whether fix #2 (anchor-agnostic seeding) looks more compelling at 13 sessions than earlier checkpoints.
-3. If a bigger-`MAX_GAP` run was launched before pausing (`track2p_1-18gap3-skip5_gap6`, `MAX_GAP=6` vs. today's `MAX_GAP=3`) -- check whether it recovered anything beyond what `MAX_GAP=3` already found via `compare_gap_vs_vanilla.py` + `fix3_partial_tracks.py`. Remember the 9 near-miss rows specifically can't be helped by any `max_gap` (they're missing the last session, `03-10-26`) -- look for OTHER rows with bigger internal gaps instead.
-4. Bigger-picture, still parked from 2026-07-20: push on to the full 18-session checkpoint and a second mouse for generality testing; confirm GitHub push actually succeeded for both repos (never reconfirmed since the ownership-transfer issue on 2026-07-20); missing-data convention for rewriting suite2p output folders with fix #3's partial-track results still needs input from the `Drift` (representation-drift) codebase side.
+1. Closing verification per the stopping rule from round 4/5: re-run `screen_sessions.py` + `registration_quality_scan.py` fresh on `skip5_2` (or `skip5_gap6`, same session list) to confirm nothing new shows up now that `12-16-25` is gone. Expect clean, but confirm rather than assume.
+2. (Optional) `estimate_fix2_ceiling.py` on the final list -- worth checking now that it's clean whether fix #2 (anchor-agnostic seeding) looks more compelling at 13 sessions than earlier checkpoints.
+3. Decide which `MAX_GAP` output (`skip5_2` vs. `skip5_gap6`) to actually hand off downstream, based on what K the representation-drift analysis can tolerate (see above).
+4. Bigger-picture, still parked from 2026-07-20: **note -- "push to 18 sessions" is now stale, that checkpoint was reached and exclusion-cleaned this session; the real remaining item is testing generality on a second mouse** (and future sessions beyond 18, if the series continues); confirm GitHub push actually succeeded for both repos (never reconfirmed since the ownership-transfer issue on 2026-07-20); missing-data convention for rewriting suite2p output folders with fix #3's partial-track results still needs input from the `Drift` (representation-drift) codebase side.
 
 ---
 

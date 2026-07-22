@@ -157,7 +157,7 @@ def main():
     out_path = args.out if args.out is not None else os.path.join(
         args.save_path, 'diagnostics', f'reg_check_{ref_idx}_{mov_idx}.png')
     os.makedirs(os.path.dirname(out_path), exist_ok=True)
-    plt.savefig(out_path, dpi=150)
+    plt.savefig(out_path, dpi=150, bbox_inches='tight')
     print(f'\nSaved {os.path.abspath(out_path)}')
     print('Look at the overlay panel: consistent red/green fringing around cell bodies/vasculature')
     print('means registration genuinely failed for this pair (FOV shift, rotation, focal-plane drift,')

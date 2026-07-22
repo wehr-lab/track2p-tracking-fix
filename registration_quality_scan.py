@@ -24,6 +24,24 @@ uses (track2p.register.elastix.reg_img_elastix) -- this is N-1 real
 registrations, the same cost as one run_gap_tolerant.py's initial
 consecutive pass, so expect it to take a while on a large session list.
 
+Flags a pair two ways, either of which is enough to flag it: a robust
+(median/MAD) z-score outlier (--z-thresh, default 2.0), OR an absolute SSIM
+floor (--ssim-floor, default 0.3). The z-score alone is NOT enough on a
+heavily contaminated list -- it's relative to the CURRENT list's own
+median/MAD, and if several sessions in the list are simultaneously bad
+(e.g. scanning a raw, not-yet-cleaned session list), their low scores drag
+the median down and inflate the MAD, so even a badly misaligned pair can
+compute to an unremarkable z-score ("outlier masking" -- the same failure
+mode that motivated building this SSIM scanner in the first place, since
+Otsu-based neighbor rate has the analogous per-pair version of this
+problem). The 0.3 default floor is calibrated against every pair this
+project has actually visually confirmed as bad so far (masked SSIM
+0.041-0.150) vs. every pair that wasn't (0.327-0.811) -- there's a real gap
+between those two clusters and 0.3 sits in it. Like the z-score flag, a
+floor flag is a trigger for visual confirmation via
+inspect_registration_pair.py, not an auto-exclude verdict -- masked SSIM's
+absolute calibration still isn't fully trusted (see registration_qc_utils.py).
+
 Also writes a grid PNG (one row per pair) so you can screen the whole
 session list visually in one image instead of opening N-1 separate
 inspect_registration_pair.py outputs. Each row shows:
@@ -51,7 +69,7 @@ image).
 
 Usage:
     python registration_quality_scan.py /path/to/track2p/save_path
-    python registration_quality_scan.py /path/to/track2p/save_path --z-thresh 2.0
+    python registration_quality_scan.py /path/to/track2p/save_path --z-thresh 2.0 --ssim-floor 0.3
     python registration_quality_scan.py /path/to/track2p/save_path --middle-panel mov_reg
     python registration_quality_scan.py /path/to/track2p/save_path --no-grid   # table only, skip the PNG
 
@@ -79,7 +97,7 @@ from session_order_utils import load_all_ds_path, ensure_chronological_order
 from registration_qc_utils import load_mean_img as _load_mean_img, norm01 as _norm01, signal_mask, masked_ssim
 
 
-def _build_grid(pairs_data, labels, scores, z, z_thresh, middle_panel, plane, out_path, panel_size, dpi):
+def _build_grid(pairs_data, labels, scores, z, flagged, z_thresh, ssim_floor, middle_panel, plane, out_path, panel_size, dpi):
     """pairs_data[i] = (ref_n, mov_raw_n, mov_reg_n, overlay) for pair i -> i+1."""
     n_pairs = len(pairs_data)
     fig, axes = plt.subplots(n_pairs, 3, figsize=(3 * panel_size, n_pairs * panel_size),
@@ -98,19 +116,19 @@ def _build_grid(pairs_data, labels, scores, z, z_thresh, middle_panel, plane, ou
         ax_mid.imshow(mid_n, cmap='gray')
         ax_ov.imshow(overlay)
 
-        flagged = z[i] <= -z_thresh
-        color = 'red' if flagged else 'black'
-        weight = 'bold' if flagged else 'normal'
+        row_flagged = flagged[i]
+        color = 'red' if row_flagged else 'black'
+        weight = 'bold' if row_flagged else 'normal'
 
         row_label = (f'{i}→{i+1}\n{labels[i]}\n→{labels[i+1]}\n'
-                     f'SSIM={scores[i]:.3f}\nz={z[i]:.1f}' + ('\nLOW_ALIGNMENT' if flagged else ''))
+                     f'SSIM={scores[i]:.3f}\nz={z[i]:.1f}' + ('\nLOW_ALIGNMENT' if row_flagged else ''))
         ax_ref.set_ylabel(row_label, rotation=0, ha='right', va='center', fontsize=7.5,
                            color=color, fontweight=weight, labelpad=8)
 
         for ax in (ax_ref, ax_mid, ax_ov):
             ax.set_xticks([])
             ax.set_yticks([])
-            if flagged:
+            if row_flagged:
                 for spine in ax.spines.values():
                     spine.set_edgecolor('red')
                     spine.set_linewidth(3)
@@ -120,9 +138,9 @@ def _build_grid(pairs_data, labels, scores, z, z_thresh, middle_panel, plane, ou
             ax_mid.set_title(col_titles[1], fontsize=9)
             ax_ov.set_title(col_titles[2], fontsize=9)
 
-    n_flagged = int(np.sum(z <= -z_thresh))
+    n_flagged = int(np.sum(flagged))
     fig.suptitle(f'registration_quality_scan.py -- plane {plane} -- {n_pairs} pair(s), '
-                 f'{n_flagged} flagged at |z|>={z_thresh} (red)', fontsize=11, y=1.0)
+                 f'{n_flagged} flagged (red) at |z|>={z_thresh} or SSIM<={ssim_floor}', fontsize=11, y=1.0)
     plt.tight_layout(rect=[0, 0, 1, 0.99])
     os.makedirs(os.path.dirname(out_path), exist_ok=True)
     plt.savefig(out_path, dpi=dpi, bbox_inches='tight')
@@ -136,6 +154,11 @@ def main():
     parser.add_argument('--plane', type=int, default=0)
     parser.add_argument('--z-thresh', type=float, default=2.0,
                          help='robust z-score magnitude to flag a pair\'s SSIM as an outlier (default 2.0)')
+    parser.add_argument('--ssim-floor', type=float, default=0.3,
+                         help='absolute SSIM floor -- flags a pair regardless of z-score (default 0.3). Guards '
+                              'against outlier masking on a heavily contaminated list, where several bad sessions '
+                              'inflate the median/MAD enough that even a genuinely bad pair no longer looks like a '
+                              'z-score outlier. See module docstring for how 0.3 was chosen.')
     parser.add_argument('--no-grid', action='store_true',
                          help='skip building the grid PNG, just print the table (faster on a long session list '
                               'if you only want the numbers)')
@@ -190,33 +213,45 @@ def main():
     z = robust_z(scores)
 
     print(f'\n{"pair":>12}  {"ref":<16} {"mov":<16} {"SSIM":>7} {"z":>6}  flag')
+    flagged = np.zeros(n_sessions - 1, dtype=bool)
     suspects = []
     for i in range(n_sessions - 1):
+        is_z_outlier = z[i] <= -args.z_thresh
+        is_below_floor = scores[i] <= args.ssim_floor
+        flagged[i] = is_z_outlier or is_below_floor
         flag = ''
-        if z[i] <= -args.z_thresh:
-            flag = '<-- LOW_ALIGNMENT'
-            suspects.append((i, i + 1, labels[i], labels[i + 1], scores[i], z[i]))
+        if flagged[i]:
+            reasons = []
+            if is_z_outlier:
+                reasons.append('z-score')
+            if is_below_floor:
+                reasons.append('abs-floor')
+            flag = f'<-- LOW_ALIGNMENT ({"+".join(reasons)})'
+            suspects.append((i, i + 1, labels[i], labels[i + 1], scores[i], z[i], reasons))
         print(f'  {i:>3}->{i+1:<3}  {labels[i]:<16} {labels[i+1]:<16} {scores[i]:>7.3f} {z[i]:>6.1f}  {flag}')
 
     print('\n' + '=' * 70)
     if suspects:
         print(f'{len(suspects)} pair(s) with anomalously low registration alignment:')
-        for i, k, ref_lbl, mov_lbl, score, zscore in suspects:
-            print(f'  {i}->{k} ({ref_lbl} -> {mov_lbl}): SSIM={score:.3f} (z={zscore:.1f})')
+        for i, k, ref_lbl, mov_lbl, score, zscore, reasons in suspects:
+            print(f'  {i}->{k} ({ref_lbl} -> {mov_lbl}): SSIM={score:.3f} (z={zscore:.1f}, {"+".join(reasons)})')
         print('\nA session showing up in TWO flagged pairs (both its neighbor transitions) is much')
         print('stronger evidence than one flagged pair alone -- cross-reference against')
         print('screen_sessions.py\'s BAD_NEIGHBOR_TRANSITIONS flag before excluding anything.')
+        print('\n"abs-floor"-only flags (no z-score) are exactly what to watch for on a list with several')
+        print('simultaneously bad sessions -- that\'s outlier masking suppressing the z-score, see module docstring.')
     else:
         print('No pairs flagged -- registration alignment looks consistent across the whole list.')
 
     if not args.no_grid:
         out_path = args.grid_out if args.grid_out is not None else os.path.join(
             args.save_path, 'diagnostics', 'registration_quality_grid.png')
-        _build_grid(pairs_data, labels, scores, z, args.z_thresh, args.middle_panel, args.plane,
-                    out_path, args.panel_size, args.dpi)
+        _build_grid(pairs_data, labels, scores, z, flagged, args.z_thresh, args.ssim_floor, args.middle_panel,
+                    args.plane, out_path, args.panel_size, args.dpi)
         print(f'\nSaved grid PNG: {os.path.abspath(out_path)}')
         print('One row per pair -- ref / mov-before-reg / overlay by default (--middle-panel mov_reg to swap the '
-              'middle column). Flagged rows (|z| >= threshold) have a red label and red panel borders.')
+              'middle column). Flagged rows (|z| >= threshold OR SSIM <= floor) have a red label and red panel '
+              'borders.')
 
 
 if __name__ == '__main__':
