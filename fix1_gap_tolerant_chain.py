@@ -165,6 +165,39 @@ def _save_checkpoint(checkpoint_path, cache):
     os.replace(tmp_base + '.tmp.npy', checkpoint_path)
 
 
+def _timing_checkpoint_path(track_ops):
+    """Where cumulative precompute/chain COMPUTE time gets persisted across
+    crash+resume attempts, alongside gap_cache_checkpoint.npy. Exists because
+    time.monotonic() resets to 0 on every new process launch: without this, a
+    crash partway through (native heap corruption -- see module docstring)
+    followed by rerunning the same command would have the final [timing]
+    summary report only the RESUMED portion's wall time, silently
+    understating true total compute time by however long the pre-crash
+    attempt ran -- exactly what happened comparing an N_WORKERS=1 run that
+    crashed and resumed against a clean single-shot N_WORKERS=10 run. This
+    tracks accumulated ACTIVE compute time only (not wall time since the
+    very first launch), so idle time between the crash and rerunning it
+    doesn't get counted either."""
+    return os.path.join(track_ops.save_path, 'gap_timing_checkpoint.npy')
+
+
+def _load_timing_checkpoint(path):
+    if not os.path.exists(path):
+        return {'precompute_elapsed': 0.0, 'chain_elapsed': 0.0}
+    d = np.load(path, allow_pickle=True).item()
+    if d.get('precompute_elapsed', 0.0) > 0 or d.get('chain_elapsed', 0.0) > 0:
+        print(f'[timing checkpoint] {path} shows {d.get("precompute_elapsed", 0.0):.1f}s precompute + '
+              f'{d.get("chain_elapsed", 0.0):.1f}s chaining already accumulated on this save_path '
+              f'(prior crashed/interrupted attempt) -- will add to this attempt\'s time below.')
+    return d
+
+
+def _save_timing_checkpoint(path, d):
+    tmp_base = path[:-4] if path.endswith('.npy') else path
+    np.save(tmp_base + '.tmp', d, allow_pickle=True)
+    os.replace(tmp_base + '.tmp.npy', path)
+
+
 def _gap_pair_worker(task):
     """Module-level (picklable) unit of work for precompute_gap_pairs_parallel()
     -- must stay top-level, not nested, so worker processes can import and
@@ -274,6 +307,7 @@ def precompute_gap_pairs_parallel(all_ds_all_roi_ref, all_ds_all_roi_mov, track_
         tasks.append((i, k, plane_j, roi_ref_raw, roi_mov_raw, ref_img, mov_img, track_ops))
 
     completed = 0
+    loop_start = time.monotonic()
     with ProcessPoolExecutor(max_workers=n_workers) as pool:
         futures = {pool.submit(_gap_pair_worker, t): t[:3] for t in tasks}
         for fut in as_completed(futures):
@@ -288,8 +322,21 @@ def precompute_gap_pairs_parallel(all_ds_all_roi_ref, all_ds_all_roi_mov, track_
             gap_assign_cache[(i, k, plane_j)] = [ref_ind, reg_ind]
             completed += 1
             if verbose:
+                # ETA from the cumulative average rate since this loop started -- the simplest
+                # estimator available here, since work is only ever submitted, never re-planned,
+                # so there's no per-task cost model to do better with. Held back until at least
+                # one full round across all workers has landed (completed >= n_workers), since
+                # the very first result or two can finish unusually fast/slow relative to the
+                # steady-state rate and produce a wildly wrong early estimate.
+                eta_str = ''
+                if completed >= max(1, n_workers) and completed < len(todo):
+                    elapsed = time.monotonic() - loop_start
+                    rate = completed / elapsed if elapsed > 0 else 0
+                    if rate > 0:
+                        eta_s = (len(todo) - completed) / rate
+                        eta_str = f', ETA {eta_s / 60:.1f} min' if eta_s >= 60 else f', ETA {eta_s:.0f}s'
                 print(f'  [gap precompute {completed}/{len(todo)}] session {i} -> {k} '
-                      f'(plane {plane_j}): {len(ref_ind)} matches above threshold')
+                      f'(plane {plane_j}): {len(ref_ind)} matches above threshold{eta_str}')
             if completed % max(1, n_workers) == 0 or completed == len(todo):
                 _save_checkpoint(checkpoint_path, gap_assign_cache)  # periodic flush, not every result
 
@@ -419,6 +466,12 @@ def run_t2p_gap_tolerant(track_ops, max_gap=3, n_workers=1):
     track_ops.init_save_paths()
     check_nplanes(track_ops)
 
+    timing_ckpt_path = _timing_checkpoint_path(track_ops)
+    timing_ckpt = _load_timing_checkpoint(timing_ckpt_path)
+    prior_precompute_elapsed = timing_ckpt.get('precompute_elapsed', 0.0)
+    prior_chain_elapsed = timing_ckpt.get('chain_elapsed', 0.0)
+    resumed_from_prior_attempt = prior_precompute_elapsed > 0 or prior_chain_elapsed > 0
+
     if track_ops.input_format == 'npy':
         print('Converting npy data to track2p-compatible format...')
         npy_to_s2p(track_ops)
@@ -458,16 +511,24 @@ def run_t2p_gap_tolerant(track_ops, max_gap=3, n_workers=1):
         precompute_gap_pairs_parallel(all_ds_all_roi_ref, all_ds_all_roi_mov, track_ops,
                                        max_gap=max_gap, n_workers=n_workers)
         precompute_elapsed = time.monotonic() - precompute_start
-        print(f'[gap] parallel precompute finished in {precompute_elapsed:.1f}s '
-              f'({n_workers} workers, max_gap={max_gap})')
+        timing_ckpt['precompute_elapsed'] = prior_precompute_elapsed + precompute_elapsed
+        _save_timing_checkpoint(timing_ckpt_path, timing_ckpt)
+        print(f'[gap] parallel precompute finished in {precompute_elapsed:.1f}s this attempt '
+              f'({n_workers} workers, max_gap={max_gap})'
+              + (f' -- {timing_ckpt["precompute_elapsed"]:.1f}s cumulative on this save_path'
+                 if resumed_from_prior_attempt else ''))
 
     # *** fix #1: gap-tolerant chaining in place of get_all_pl_match_mat ***
     chain_start = time.monotonic()
     all_pl_match_mat, gap_assign_cache = get_all_pl_match_mat_gap(
         all_ds_all_roi_ref, all_ds_all_roi_mov, all_ds_assign_thr, track_ops, max_gap=max_gap)
     chain_elapsed = time.monotonic() - chain_start
-    print(f'[gap] chaining step finished in {chain_elapsed:.1f}s '
-          f'({"warm cache from precompute above" if precompute_elapsed is not None else "lazy, sequential gap registration as needed"})')
+    timing_ckpt['chain_elapsed'] = prior_chain_elapsed + chain_elapsed
+    _save_timing_checkpoint(timing_ckpt_path, timing_ckpt)
+    print(f'[gap] chaining step finished in {chain_elapsed:.1f}s this attempt '
+          f'({"warm cache from precompute above" if precompute_elapsed is not None else "lazy, sequential gap registration as needed"})'
+          + (f' -- {timing_ckpt["chain_elapsed"]:.1f}s cumulative on this save_path'
+             if resumed_from_prior_attempt else ''))
 
     save_track_ops(track_ops)
     save_match_diagnostics(all_ds_thr_met, all_ds_thr, track_ops)
@@ -500,12 +561,24 @@ def run_t2p_gap_tolerant(track_ops, max_gap=3, n_workers=1):
           f'(out of up to {sum(min(max_gap, len(track_ops.all_ds_path) - 1 - i) - 1 for i in range(len(track_ops.all_ds_path) - 1))} possible).')
 
     total_elapsed = time.monotonic() - run_start
-    print(f'\n[timing] total run_t2p_gap_tolerant wall time: {total_elapsed / 60:.1f} min '
+    print(f'\n[timing] total run_t2p_gap_tolerant wall time (this process): {total_elapsed / 60:.1f} min '
           f'({total_elapsed:.0f}s), n_workers={n_workers}, max_gap={max_gap}')
     if precompute_elapsed is not None:
-        print(f'[timing]   of which parallel precompute: {precompute_elapsed / 60:.1f} min '
+        print(f'[timing]   precompute (this process): {precompute_elapsed / 60:.1f} min '
               f'({precompute_elapsed:.0f}s) -- this is the phase N_WORKERS actually speeds up')
-    print(f'[timing]   of which chaining: {chain_elapsed / 60:.1f} min ({chain_elapsed:.0f}s)')
+    print(f'[timing]   chaining (this process): {chain_elapsed / 60:.1f} min ({chain_elapsed:.0f}s)')
+    if resumed_from_prior_attempt:
+        cumulative_precompute = timing_ckpt.get('precompute_elapsed', 0.0)
+        cumulative_chain = timing_ckpt.get('chain_elapsed', 0.0)
+        print(f'\n[timing] NOTE: this save_path had a prior crashed/interrupted attempt -- "this process" '
+              f'above only covers work done SINCE the resume, so it understates true total compute time. '
+              f'Cumulative gap-registration compute time across ALL attempts on this save_path (idle time '
+              f'between attempts excluded, and NOT including data-loading/consecutive-pair-registration time '
+              f'from the crashed attempt, which redoes on resume and isn\'t itself checkpointed):')
+        print(f'[timing]   precompute cumulative: {cumulative_precompute / 60:.1f} min ({cumulative_precompute:.0f}s)')
+        print(f'[timing]   chaining cumulative:   {cumulative_chain / 60:.1f} min ({cumulative_chain:.0f}s)')
+        print(f'[timing]   Use these cumulative numbers, not "this process" above, when comparing against an '
+              f'N_WORKERS run that completed cleanly in one shot.')
 
     print('Done!\n')
 
