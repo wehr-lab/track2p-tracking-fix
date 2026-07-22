@@ -11,7 +11,7 @@ then run:
 python run_gap_tolerant.py
 """
 
-from session_order_utils import load_all_ds_path  # noqa: F401  (used below)
+from session_order_utils import load_all_ds_path, find_session_dirs  # noqa: F401  (used below)
 
 # Preferred: central settings file (see track_ops_config.py to generate one).
 TRACK_OPS_CFG = '/Users/wehr/Documents/Analysis/track2p-tracking-fix/track2p_settings.cfg'
@@ -54,7 +54,7 @@ SETTINGS_SOURCE_PATH = None
 # docstring in fix1_gap_tolerant_chain.py for the trade-off and gotchas.
 N_WORKERS = 10
 
-ALL_DS_PATH = load_all_ds_path('/Volumes/Projects/2P5XFAD/JarascopeData/wehr5917')
+ALL_DS_PATH = find_session_dirs('/Volumes/Projects/2P5XFAD/JarascopeData/wehr5917')
 NEW_BASE_PATH = '/Users/wehr/Documents/Projects/Representational drift/wehr5917/gap1'
 MAX_GAP = 1
 
