@@ -6,6 +6,9 @@ purpose: when Claude revises run_gap_tolerant.py's logic, this file is
 never touched. Edit the values below by hand before each run, same as
 you did inside the launcher script before -- just without the risk of a
 code change overwriting your edits.
+
+then run:
+python run_gap_tolerant.py
 """
 
 from session_order_utils import load_all_ds_path  # noqa: F401  (used below)
@@ -33,14 +36,14 @@ SETTINGS_SOURCE_PATH = None
 # below):
 #     ALL_DS_PATH = load_all_ds_path('/path/to/prev_run/track2p')
 ALL_DS_PATH = load_all_ds_path(
-    '/Users/wehr/Documents/Projects/Representational drift/wehr5336/track2p_1-18gap3-skip3/track2p'
+    '/Users/wehr/Documents/Projects/Representational drift/wehr5336/track2p_1-18gap3-skip5/track2p'
 )
 
 # Where to write this run's output. Give this a NEW directory, not
 # SETTINGS_SOURCE_PATH or its parent -- run_t2p_gap_tolerant() appends a
 # 'track2p/' subfolder onto whatever save_path you give it, so reusing the
 # parent of an existing run would land back on it and overwrite results.
-NEW_BASE_PATH = '/Users/wehr/Documents/Projects/Representational drift/wehr5336/track2p_1-18gap3-skip3_2'
+NEW_BASE_PATH = '/Users/wehr/Documents/Projects/Representational drift/wehr5336/track2p_1-18gap3-skip5_2'
 
 MAX_GAP = 3
 
@@ -49,4 +52,4 @@ MAX_GAP = 3
 # behavior -- safest default, keep it here until you've validated a higher
 # value on a small session subset. See precompute_gap_pairs_parallel()'s
 # docstring in fix1_gap_tolerant_chain.py for the trade-off and gotchas.
-N_WORKERS = 6
+N_WORKERS = 10

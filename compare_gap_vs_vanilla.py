@@ -15,11 +15,11 @@ one of the two that CAN produce that pattern (a genuine hole mid-track).
 This script checks:
 
   1. Did n_present increase for ANY row at all (even if it didn't flip
-     enough rows to change the K=9 strict-AND total)?
+     enough rows to change the strict-AND total)?
   2. For rows that were 1 session short of full (n_present == n_sessions-1)
      under vanilla -- the easiest possible rescue -- did gap-tolerant
      actually complete any of them to n_sessions?
-  3. Are the exact strict-AND-9 cells identical between the two runs, or
+  3. Are the exact strict-AND cells identical between the two runs, or
      different cells that happen to add up to the same count?
   4. Did gap-tolerant ever produce a genuine mid-track hole (proof the gap
      logic executed and changed the pattern), or does every row still look
@@ -77,7 +77,7 @@ def compare(vanilla_mm, gap_mm, plane_idx):
             n_holes += 1
 
     print(f'\n=== Plane {plane_idx} ({n_roi} candidate ROIs, {n_sessions} sessions) ===')
-    print(f'  strict-AND(9) vanilla: {len(van_strict9)}   gap-tolerant: {len(gap_strict9)}')
+    print(f'  strict-AND({n_sessions}) vanilla: {len(van_strict9)}   gap-tolerant: {len(gap_strict9)}')
     print(f'  same exact cells: {van_strict9 == gap_strict9}   '
           f'(overlap: {len(van_strict9 & gap_strict9)}, vanilla-only: {len(van_strict9 - gap_strict9)}, '
           f'gap-only: {len(gap_strict9 - van_strict9)})')

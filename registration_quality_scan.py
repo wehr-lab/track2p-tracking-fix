@@ -75,6 +75,7 @@ from track2p.ops.default import DefaultTrackOps
 from track2p.register.elastix import reg_img_elastix
 
 from screen_sessions import robust_z  # same median/MAD z-score used for cell count / sharpness
+from session_order_utils import load_all_ds_path, ensure_chronological_order
 from registration_qc_utils import load_mean_img as _load_mean_img, norm01 as _norm01, signal_mask, masked_ssim
 
 
@@ -151,7 +152,15 @@ def main():
     track_ops = DefaultTrackOps()
     track_ops_dict = np.load(os.path.join(args.save_path, 'track_ops.npy'), allow_pickle=True).item()
     track_ops.from_dict(track_ops_dict)
-    all_ds_path = track_ops.all_ds_path
+
+    # NOTE: track_ops.all_ds_path here is whatever order was saved in this run's
+    # track_ops.npy, which is only chronological if something upstream (run_gap_tolerant.py,
+    # run_exclude_session.py) already sorted it before running -- this script didn't check on
+    # its own, so a misordered save could silently produce grid rows/table pairs out of date
+    # order. load_all_ds_path() + ensure_chronological_order() match the same guard those
+    # launcher scripts apply before registering anything.
+    all_ds_path = ensure_chronological_order(load_all_ds_path(args.save_path))
+    track_ops.all_ds_path = all_ds_path
     n_sessions = len(all_ds_path)
     labels = [os.path.basename(os.path.normpath(p)) for p in all_ds_path]
 

@@ -4,6 +4,10 @@ run_exclude_session_settings.py
 Per-run settings for run_exclude_session.py, kept in a separate file on
 purpose: when Claude revises run_exclude_session.py's logic, this file is
 never touched. Edit the values below by hand before each run.
+
+then run
+python run_exclude_session.py
+
 """
 
 from session_order_utils import load_all_ds_path  # noqa: F401  (used below)
@@ -49,7 +53,7 @@ SETTINGS_SOURCE_PATH = None
 # EXCLUDE_MATCH = '12-09-25'
 
 ALL_DS_PATH = load_all_ds_path(
-    '/Users/wehr/Documents/Projects/Representational drift/wehr5336/track2p_1-18gap3-skip3/track2p'
+    '/Users/wehr/Documents/Projects/Representational drift/wehr5336/track2p_1-18gap3-skip4/track2p'
 )
-NEW_BASE_PATH = '/Users/wehr/Documents/Projects/Representational drift/wehr5336/track2p_1-18gap3-skip4'
-EXCLUDE_MATCH = '11-13-25'
+NEW_BASE_PATH = '/Users/wehr/Documents/Projects/Representational drift/wehr5336/track2p_1-18gap3-skip5'
+EXCLUDE_MATCH = '12-16-25'
