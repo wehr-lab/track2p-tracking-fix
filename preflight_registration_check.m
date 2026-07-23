@@ -33,11 +33,14 @@
 %   pipeline's outcome, and hand-edit elastix_params.txt directly if
 %   anything differs -- this script just reads that text file.
 %
-%   Also needs the REFERENCE session's meanImg exported to .mat -- reuses
-%   the existing export_session_qc.py for this, no new export tool needed:
-%     python export_session_qc.py /path/to/reference/track2p/save_path --sessions 0
-%   (or whatever 0-indexed session you're anchoring against). Produces
-%   session_qc.mat; point REFERENCE_QC_MAT below at it.
+%   Also needs the REFERENCE session's mean image exported once, straight
+%   to MetaImage (.mhd/.raw) format -- no MATLAB-side .mat loading step,
+%   and no track2p run required either (reads directly from suite2p's own
+%   ops.npy):
+%     python export_reference_mhd.py /path/to/reference/session_dir --plane 0 --out ref
+%   Produces ref.mhd + ref.raw; point REFERENCE_MHD_BASE below at that same
+%   base path (no extension). This script's own readMHD() (below) reads it
+%   back the same way it reads elastix's own output.
 %
 % REQUIRES:
 %   - A standalone `elastix` command-line install on THIS machine (the rig
@@ -65,7 +68,7 @@ SBX_FILENAME        = 'xx0_000_001';                  % base filename, no extens
 N_FRAMES             = 1000;                           % frames to read and average -- see module docstring
 REG_CHAN             = 1;                               % 1-indexed channel/PMT to use, matching track_ops.reg_chan
 
-REFERENCE_QC_MAT     = 'session_qc.mat';                % from export_session_qc.py --sessions <ref_idx>
+REFERENCE_MHD_BASE   = 'ref';                            % from export_reference_mhd.py, no extension
 ELASTIX_PARAMS_FILE  = 'elastix_params.txt';             % from export_elastix_params.py
 ELASTIX_BIN          = 'elastix';                        % full path if not on system PATH
 WORK_DIR             = fullfile(tempdir, 'preflight_check');  % scratch dir for MHD files + elastix output
@@ -92,13 +95,10 @@ newImg = extractMeanFrame(raw, REG_CHAN);
 fprintf('New-session mean image: %d x %d\n', size(newImg, 1), size(newImg, 2));
 
 %% ---- 2. load the reference session's existing meanImg -----------------
+%%      (pre-exported once via export_reference_mhd.py -- see SETUP above)
 
-ref = load(REFERENCE_QC_MAT);
-refImg = double(ref.meanImg{1});
-refLabel = '';
-if isfield(ref, 'session_labels')
-    refLabel = ref.session_labels{1};
-end
+[~, refLabel] = fileparts(REFERENCE_MHD_BASE);
+refImg = readMHD([REFERENCE_MHD_BASE '.mhd']);
 fprintf('Reference image (%s): %d x %d\n', refLabel, size(refImg, 1), size(refImg, 2));
 
 if ~isequal(size(refImg), size(newImg))
@@ -109,14 +109,13 @@ end
 
 %% ---- 3. register newImg onto refImg via the elastix CLI ----------------
 
-refMhdBase = fullfile(WORK_DIR, 'ref');
+refMhdBase = REFERENCE_MHD_BASE;   % already on disk -- exported once by export_reference_mhd.py
 movMhdBase = fullfile(WORK_DIR, 'mov');
 outDir     = fullfile(WORK_DIR, 'out');
 if ~exist(outDir, 'dir')
     mkdir(outDir);
 end
 
-writeMHD(refImg, refMhdBase);
 writeMHD(newImg, movMhdBase);
 
 cmd = sprintf('%s -f %s.mhd -m %s.mhd -p %s -out %s', ...
