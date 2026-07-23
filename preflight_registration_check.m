@@ -86,6 +86,16 @@ REF_N_FRAMES  = 1000;
 NEW_N_FRAMES  = 1000;   % keep this short -- the whole point is a quick check
 REG_CHAN      = 1;      % 1-indexed channel/PMT to use, matching track_ops.reg_chan -- same for both sessions
 
+% If true, rigid (translation-only) motion-correct each frame stack --
+% aligning every frame to its stack's first frame via FFT phase
+% correlation before averaging, instead of a plain naive average -- see
+% rigidAlignStack() below. Off by default (preserves prior behavior); flip
+% on if within-session jitter blur turns out to matter for your data. When
+% on, prints per-read and total elapsed time for the alignment step, since
+% it roughly doubles the FFT work per frame and is worth knowing the cost
+% of.
+DO_MOTION_CORRECTION = false;
+
 ELASTIX_PARAMS_FILE  = 'elastix_params.txt';             % from export_elastix_params.py
 
 % Use the FULL PATH to elastix.exe here, not just 'elastix' -- confirmed on
@@ -109,12 +119,16 @@ if ~exist(WORK_DIR, 'dir')
 end
 
 fprintf('Reading %d frames from reference: %s...\n', REF_N_FRAMES, REF_SBX_PATH);
-refImg = loadSbxMeanImg(REF_SBX_PATH, REF_N_FRAMES, REG_CHAN);
+[refImg, refMcTime] = loadSbxMeanImg(REF_SBX_PATH, REF_N_FRAMES, REG_CHAN, DO_MOTION_CORRECTION);
 fprintf('Reference mean image: %d x %d\n', size(refImg, 1), size(refImg, 2));
 
 fprintf('Reading %d frames from new session: %s...\n', NEW_N_FRAMES, NEW_SBX_PATH);
-newImg = loadSbxMeanImg(NEW_SBX_PATH, NEW_N_FRAMES, REG_CHAN);
+[newImg, newMcTime] = loadSbxMeanImg(NEW_SBX_PATH, NEW_N_FRAMES, REG_CHAN, DO_MOTION_CORRECTION);
 fprintf('New-session mean image: %d x %d\n', size(newImg, 1), size(newImg, 2));
+
+if DO_MOTION_CORRECTION
+    fprintf('Total motion correction time (ref + new): %.1f s\n', refMcTime + newMcTime);
+end
 
 if ~isequal(size(refImg), size(newImg))
     error(['Reference and new-session images are different sizes (%dx%d vs %dx%d) -- ' ...
@@ -200,26 +214,86 @@ fprintf(['\nDo NOT decide from the SSIM number alone -- look at the overlay pane
 
 %% ================= local functions =====================================
 
-function img2d = loadSbxMeanImg(sbxPath, nFrames, chan)
-    % Reads nFrames starting at frame 0 from sbxPath and averages them for
-    % the requested channel. ADAPT to your actual sbxread.m signature/
-    % output shape if it differs -- see the assumed convention documented
-    % in extractMeanFrame() below.
+function [img2d, mcElapsed] = loadSbxMeanImg(sbxPath, nFrames, chan, doMotionCorrection)
+    % Reads nFrames starting at frame 0 from sbxPath, optionally rigid-
+    % aligns them (see doMotionCorrection / rigidAlignStack() below), and
+    % averages them for the requested channel. mcElapsed is the alignment
+    % time in seconds (0 if doMotionCorrection is false). ADAPT to your
+    % actual sbxread.m signature/output shape if it differs -- see the
+    % assumed convention documented in extractChanStack() below.
     raw = sbxread(sbxPath, 0, nFrames);
-    img2d = extractMeanFrame(raw, chan);
+    chanStack = extractChanStack(raw, chan);
+
+    mcElapsed = 0;
+    if doMotionCorrection
+        mcStart = tic;
+        chanStack = rigidAlignStack(chanStack);
+        mcElapsed = toc(mcStart);
+        fprintf('  [motion correction] %d frames aligned in %.1f s\n', size(chanStack, 3), mcElapsed);
+    end
+
+    img2d = double(mean(chanStack, 3));
 end
 
-function img2d = extractMeanFrame(raw, chan)
+function chanStack = extractChanStack(raw, chan)
     % ADAPT to your sbxread's actual output shape. Assumed here (the
     % common Scanbox/Neurolabware community convention): sbxread(fname, k,
     % N) returns frames k..k+N-1 (k is 0-INDEXED) as a 4D array
     % [nChannels x nRows x nCols x N]. If your version returns a different
     % dimension order (e.g. [nRows x nCols x nChannels x N], or a single
     % channel already selected, or frames along dim 1), fix ONLY this
-    % function -- everything downstream just expects a plain 2D double
-    % image back from it.
-    chanStack = squeeze(raw(chan, :, :, :));   % -> [nRows x nCols x N]
-    img2d = double(mean(chanStack, 3));
+    % function -- everything downstream just expects a plain
+    % [nRows x nCols x N] double stack back from it.
+    chanStack = double(squeeze(raw(chan, :, :, :)));   % -> [nRows x nCols x N]
+end
+
+function chanStack = rigidAlignStack(chanStack)
+    % Rigid (translation-only) motion correction: aligns every frame in
+    % chanStack to its OWN first frame via FFT-based phase correlation --
+    % the same class of approach suite2p's own rigid registration stage
+    % uses -- then returns the shifted stack ready for averaging. Integer-
+    % pixel shifts only (no subpixel interpolation): plenty to de-blur a
+    % quick preflight mean image, not meant to be scientifically precise.
+    %
+    % The shift sign/wraparound convention (and its circshift(..., ...
+    % [rowShift, colShift]) application below, NOT [-rowShift, -colShift]
+    % -- an earlier draft of this had that backwards) WAS validated via a
+    % synthetic-shift round-trip test in Python before being written here.
+    % The rest of this script is still UNTESTED end-to-end -- no MATLAB
+    % available when this was built -- so still worth a sanity check
+    % against real data (e.g. does the aligned mean image look visibly
+    % sharper than a naive average of the same frames?).
+    %
+    % If frame 1 looks atypical for your data (e.g. a settling artifact at
+    % acquisition start), point refFrame at a middle frame instead:
+    % chanStack(:, :, round(size(chanStack, 3) / 2)).
+    [nRows, nCols, nFrames] = size(chanStack);
+    refFrame = chanStack(:, :, 1);
+    refFFT = fft2(refFrame);
+
+    for k = 2:nFrames
+        movFFT = fft2(chanStack(:, :, k));
+        crossPower = (refFFT .* conj(movFFT)) ./ (abs(refFFT .* conj(movFFT)) + eps);
+        corrImg = abs(ifft2(crossPower));
+        [~, maxIdx] = max(corrImg(:));
+        [rowIdx, colIdx] = ind2sub([nRows, nCols], maxIdx);
+
+        rowShift = wrapToSignedShift(rowIdx - 1, nRows);
+        colShift = wrapToSignedShift(colIdx - 1, nCols);
+
+        chanStack(:, :, k) = circshift(chanStack(:, :, k), [rowShift, colShift]);
+    end
+end
+
+function s = wrapToSignedShift(idx0, n)
+    % Converts a 0-indexed FFT-domain index (0..n-1) into a signed pixel
+    % shift in (-n/2, n/2] -- an FFT bin past the Nyquist point represents
+    % a negative (wrapped-around) shift, not a huge positive one.
+    if idx0 > n / 2
+        s = idx0 - n;
+    else
+        s = idx0;
+    end
 end
 
 function writeMHD(img, basePath)
