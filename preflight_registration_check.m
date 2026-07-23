@@ -87,7 +87,17 @@ NEW_N_FRAMES  = 1000;   % keep this short -- the whole point is a quick check
 REG_CHAN      = 1;      % 1-indexed channel/PMT to use, matching track_ops.reg_chan -- same for both sessions
 
 ELASTIX_PARAMS_FILE  = 'elastix_params.txt';             % from export_elastix_params.py
-ELASTIX_BIN          = 'elastix';                        % full path if not on system PATH
+
+% Use the FULL PATH to elastix.exe here, not just 'elastix' -- confirmed on
+% real rig hardware that MATLAB's system() can fail to find it on PATH even
+% when a fresh cmd window finds it fine (MATLAB's system() inherits the
+% environment captured when MATLAB itself launched, so a PATH edit made
+% afterward, or made in a different scope than MATLAB's launching process,
+% silently doesn't apply until MATLAB is restarted -- if it's restarted at
+% all). Get the full path from a working cmd window with `where elastix`,
+% e.g. 'C:\Program Files\elastix\elastix.exe' (no backslash-escaping
+% needed in a MATLAB single-quoted string). This sidesteps PATH entirely.
+ELASTIX_BIN          = 'elastix';
 WORK_DIR             = fullfile(tempdir, 'preflight_check');  % scratch dir for MHD files + elastix output
 
 SSIM_SIGNAL_PCTILE   = 80;   % mask to ref's brightest (100-80)=20% of pixels, matching registration_qc_utils.py
@@ -130,6 +140,13 @@ fprintf('Running: %s\n', cmd);
 [status, cmdOut] = system(cmd);
 if status ~= 0
     fprintf('%s\n', cmdOut);
+    if contains(cmdOut, 'is not recognized') || contains(cmdOut, 'command not found')
+        error(['elastix CLI failed (exit %d): "%s" was not found by MATLAB''s system() call, even if it ' ...
+               'works in a plain terminal -- MATLAB inherits PATH from when IT launched, so a PATH edit ' ...
+               'made afterward (or in a different scope) silently does not apply, restart or not. Fix: set ' ...
+               'ELASTIX_BIN above to the FULL PATH to elastix.exe (find it via `where elastix` in a ' ...
+               'terminal where it does work) instead of relying on PATH at all.'], status, ELASTIX_BIN);
+    end
     error(['elastix CLI failed (exit %d) -- see output above. Common causes: elastix not on PATH, ' ...
             'ELASTIX_PARAMS_FILE not found, or a malformed parameter file.'], status);
 end
