@@ -1,27 +1,28 @@
 """
 export_reference_mhd.py
 
-One-time export of a single suite2p session's mean image straight to
-MetaImage (.mhd/.raw) format, for preflight_registration_check.m to read
-directly as its reference image.
+NOTE: preflight_registration_check.m no longer uses this -- it now reads
+BOTH its reference and new-session images directly from raw .sbx files (no
+suite2p processing required for either one, since the rig computer may not
+have suite2p output available/reachable at check time). Kept here because
+it's still useful on its own: a one-time export of a single suite2p
+session's mean image straight to MetaImage (.mhd/.raw) format, for any
+other MATLAB-side use where you DO want to check against an
+already-suite2p-processed session's real meanImg instead of a raw .sbx
+average.
 
-Replaces the export_session_qc.py -> session_qc.mat -> MATLAB load() ->
-MATLAB writeMHD() chain with a single step: this script writes the
-.mhd/.raw pair itself, and preflight_registration_check.m reads it back
-with the SAME readMHD() it already uses to parse elastix's own output --
-no MATLAB-side .mat handling needed at all, and no track2p run required
-either (this reads straight from suite2p's own ops.npy, via the same
-load_mean_img() helper registration_quality_scan.py and
-inspect_registration_pair.py already use -- not from any track2p output).
+Writes the .mhd/.raw pair directly from suite2p's own ops.npy, via the
+same load_mean_img() helper registration_quality_scan.py and
+inspect_registration_pair.py already use -- no track2p run required, just
+a session directory with a suite2p subfolder.
 
-Run once, whenever you pick a new reference session (not before every
-preflight check):
+Usage:
 
     python export_reference_mhd.py /path/to/session_dir --plane 0 --out ref
 
-Writes ref.mhd + ref.raw (or wherever --out points). Point
-preflight_registration_check.m's REFERENCE_MHD_BASE config at the same
-base path (no extension).
+Writes ref.mhd + ref.raw (or wherever --out points). Any MATLAB script
+using this project's readMHD() convention (see
+preflight_registration_check.m) can read it back directly.
 
 FORMAT NOTE: ElementType=MET_FLOAT, DimSize = ncols nrows (x, y -- MHD's
 axis order), raw bytes written row-major/x-fastest via numpy's native

@@ -7,19 +7,27 @@
 % "Pre-Flight Registration Check" future-direction slide).
 %
 % WORKFLOW:
-%   1. Acquire a SHORT sbx file (N_FRAMES below, ~1000 by default -- a few
-%      seconds to ~1 min at typical frame rates) of the new FOV. Scanbox
-%      needs the acquisition to finish/close before the file is readable,
-%      so this is "acquire short clip -> stop -> run this script -> decide"
-%      rather than a truly live check -- still a large win over finding out
-%      after a full session + suite2p run.
-%   2. Run this script. It averages those frames into a mean projection,
-%      registers it against your reference session's ALREADY-COMPUTED
-%      suite2p meanImg (no suite2p needed for the NEW session at all), and
-%      shows you the same red/green overlay convention used everywhere
-%      else in this project (yellow/white = aligned, red/green fringes =
-%      not) plus a masked SSIM score.
+%   1. Acquire a SHORT sbx file (NEW_N_FRAMES below, ~1000 by default -- a
+%      few seconds to ~1 min at typical frame rates) of the new FOV.
+%      Scanbox needs the acquisition to finish/close before the file is
+%      readable, so this is "acquire short clip -> stop -> run this script
+%      -> decide" rather than a truly live check -- still a large win over
+%      finding out after a full session + suite2p run.
+%   2. Run this script. It reads and averages frames from BOTH the
+%      reference session's raw .sbx file and the new short clip's raw .sbx
+%      file (no suite2p processing needed for EITHER one -- see note
+%      below), registers them, and shows you the same red/green overlay
+%      convention used everywhere else in this project (yellow/white =
+%      aligned, red/green fringes = not) plus a masked SSIM score.
 %   3. Decide: reposition and re-check, or proceed with the full session.
+%
+% WHY BOTH IMAGES COME FROM RAW .sbx, NOT SUITE2P: this needs to run
+% BEFORE the reference session's suite2p processing is guaranteed to be
+% done, and the rig computer may not even have access to wherever that
+% processed output lives (only local raw data). Reading a fixed frame
+% count from each session's raw .sbx directly sidesteps both problems, at
+% the cost of a noisier reference average than a full-session suite2p
+% meanImg would give -- see REF_N_FRAMES below.
 %
 % SETUP (one-time, or whenever track_ops.transform_type changes):
 %   From the track2p conda env:
@@ -33,14 +41,12 @@
 %   pipeline's outcome, and hand-edit elastix_params.txt directly if
 %   anything differs -- this script just reads that text file.
 %
-%   Also needs the REFERENCE session's mean image exported once, straight
-%   to MetaImage (.mhd/.raw) format -- no MATLAB-side .mat loading step,
-%   and no track2p run required either (reads directly from suite2p's own
-%   ops.npy):
-%     python export_reference_mhd.py /path/to/reference/session_dir --plane 0 --out ref
-%   Produces ref.mhd + ref.raw; point REFERENCE_MHD_BASE below at that same
-%   base path (no extension). This script's own readMHD() (below) reads it
-%   back the same way it reads elastix's own output.
+%   No Python step is needed for the reference image itself -- both
+%   REF_SBX_PATH and NEW_SBX_PATH below are read directly by this script.
+%   (export_reference_mhd.py still exists in this repo and is still useful
+%   if you ever want to check against an already-suite2p-processed
+%   session's meanImg instead -- it's just no longer part of this script's
+%   own workflow.)
 %
 % REQUIRES:
 %   - A standalone `elastix` command-line install on THIS machine (the rig
@@ -64,42 +70,41 @@
 %%      file, same spirit as this project's Python launcher/settings split,
 %%      once this is past the prototype stage) ----
 
-SBX_FILENAME        = 'xx0_000_001';                  % base filename, no extension (sbxread convention)
-N_FRAMES             = 1000;                           % frames to read and average -- see module docstring
-REG_CHAN             = 1;                               % 1-indexed channel/PMT to use, matching track_ops.reg_chan
+% Both paths are full/absolute paths (not just base filenames), since the
+% reference session and the new short clip live in their own separate
+% session folders -- no extension, matching sbxread's convention.
+REF_SBX_PATH  = '/full/path/to/reference/session/xx0_000_000';
+NEW_SBX_PATH  = '/full/path/to/todays/short/test/xx0_000_001';
 
-REFERENCE_MHD_BASE   = 'ref';                            % from export_reference_mhd.py, no extension
+% The reference session's .sbx is already fully acquired -- no time
+% pressure there, unlike the new short test clip -- so raise this if 1000
+% frames looks noisier than a real suite2p meanImg would. (Averaging the
+% ENTIRE reference file instead of a fixed count would be cleaner still --
+% adapt loadSbxMeanImg() below if your sbxread/its companion .mat exposes
+% a total-frame count.)
+REF_N_FRAMES  = 1000;
+NEW_N_FRAMES  = 1000;   % keep this short -- the whole point is a quick check
+REG_CHAN      = 1;      % 1-indexed channel/PMT to use, matching track_ops.reg_chan -- same for both sessions
+
 ELASTIX_PARAMS_FILE  = 'elastix_params.txt';             % from export_elastix_params.py
 ELASTIX_BIN          = 'elastix';                        % full path if not on system PATH
 WORK_DIR             = fullfile(tempdir, 'preflight_check');  % scratch dir for MHD files + elastix output
 
 SSIM_SIGNAL_PCTILE   = 80;   % mask to ref's brightest (100-80)=20% of pixels, matching registration_qc_utils.py
 
-%% ---- 1. read + average a short raw acquisition -----------------------
+%% ---- 1. read + average both raw acquisitions --------------------------
 
 if ~exist(WORK_DIR, 'dir')
     mkdir(WORK_DIR);
 end
 
-% ADAPT THIS BLOCK to your actual sbxread.m signature/output shape.
-% Assumed here (the common Scanbox/Neurolabware community convention):
-%   sbxread(fname, k, N) returns frames k..k+N-1 (k is 0-INDEXED, i.e. 0 =
-%   first frame) as a 4D array [nChannels x nRows x nCols x N]. If your
-%   version returns a different dimension order (e.g. [nRows x nCols x
-%   nChannels x N], or a single channel already selected, or frames along
-%   dim 1), fix ONLY extractMeanFrame() below -- everything downstream just
-%   expects a plain 2D double image back from it.
-fprintf('Reading %d frames from %s...\n', N_FRAMES, SBX_FILENAME);
-raw = sbxread(SBX_FILENAME, 0, N_FRAMES);
-newImg = extractMeanFrame(raw, REG_CHAN);
+fprintf('Reading %d frames from reference: %s...\n', REF_N_FRAMES, REF_SBX_PATH);
+refImg = loadSbxMeanImg(REF_SBX_PATH, REF_N_FRAMES, REG_CHAN);
+fprintf('Reference mean image: %d x %d\n', size(refImg, 1), size(refImg, 2));
+
+fprintf('Reading %d frames from new session: %s...\n', NEW_N_FRAMES, NEW_SBX_PATH);
+newImg = loadSbxMeanImg(NEW_SBX_PATH, NEW_N_FRAMES, REG_CHAN);
 fprintf('New-session mean image: %d x %d\n', size(newImg, 1), size(newImg, 2));
-
-%% ---- 2. load the reference session's existing meanImg -----------------
-%%      (pre-exported once via export_reference_mhd.py -- see SETUP above)
-
-[~, refLabel] = fileparts(REFERENCE_MHD_BASE);
-refImg = readMHD([REFERENCE_MHD_BASE '.mhd']);
-fprintf('Reference image (%s): %d x %d\n', refLabel, size(refImg, 1), size(refImg, 2));
 
 if ~isequal(size(refImg), size(newImg))
     error(['Reference and new-session images are different sizes (%dx%d vs %dx%d) -- ' ...
@@ -107,15 +112,16 @@ if ~isequal(size(refImg), size(newImg))
           size(refImg, 1), size(refImg, 2), size(newImg, 1), size(newImg, 2));
 end
 
-%% ---- 3. register newImg onto refImg via the elastix CLI ----------------
+%% ---- 2. register newImg onto refImg via the elastix CLI ----------------
 
-refMhdBase = REFERENCE_MHD_BASE;   % already on disk -- exported once by export_reference_mhd.py
+refMhdBase = fullfile(WORK_DIR, 'ref');
 movMhdBase = fullfile(WORK_DIR, 'mov');
 outDir     = fullfile(WORK_DIR, 'out');
 if ~exist(outDir, 'dir')
     mkdir(outDir);
 end
 
+writeMHD(refImg, refMhdBase);
 writeMHD(newImg, movMhdBase);
 
 cmd = sprintf('%s -f %s.mhd -m %s.mhd -p %s -out %s', ...
@@ -136,7 +142,7 @@ end
 newImgReg = readMHD(resultMhd);
 fprintf('Registration complete.\n');
 
-%% ---- 4. masked SSIM + red/green overlay (same convention as ----------
+%% ---- 3. masked SSIM + red/green overlay (same convention as ----------
 %%         registration_qc_utils.py / inspect_registration_pair.py) ------
 
 refN = norm01(refImg);
@@ -157,9 +163,12 @@ overlay = zeros(size(refImg, 1), size(refImg, 2), 3);
 overlay(:, :, 1) = refN;      % red = ref
 overlay(:, :, 2) = movRegN;   % green = registered new session
 
+[~, refLabel] = fileparts(REF_SBX_PATH);
+[~, newLabel] = fileparts(NEW_SBX_PATH);
+
 figure('Name', 'preflight_registration_check', 'Position', [100 100 1400 500]);
 subplot(1, 3, 1); imshow(refN); title(sprintf('ref: %s', strrep(refLabel, '_', '\_')));
-subplot(1, 3, 2); imshow(movRegN); title('new session (registered)');
+subplot(1, 3, 2); imshow(movRegN); title(sprintf('new: %s (registered)', strrep(newLabel, '_', '\_')));
 subplot(1, 3, 3); imshow(overlay);
 title(sprintf('overlay (SSIM=%.3f)\nyellow/white=aligned, red/green fringes=NOT', ssimScore));
 
@@ -174,11 +183,24 @@ fprintf(['\nDo NOT decide from the SSIM number alone -- look at the overlay pane
 
 %% ================= local functions =====================================
 
+function img2d = loadSbxMeanImg(sbxPath, nFrames, chan)
+    % Reads nFrames starting at frame 0 from sbxPath and averages them for
+    % the requested channel. ADAPT to your actual sbxread.m signature/
+    % output shape if it differs -- see the assumed convention documented
+    % in extractMeanFrame() below.
+    raw = sbxread(sbxPath, 0, nFrames);
+    img2d = extractMeanFrame(raw, chan);
+end
+
 function img2d = extractMeanFrame(raw, chan)
-    % ADAPT to your sbxread's actual output shape -- see config section
-    % comment above. Assumes [nChannels x nRows x nCols x N] in; averages
-    % over the frame dimension for the requested channel and returns a
-    % plain 2D double image.
+    % ADAPT to your sbxread's actual output shape. Assumed here (the
+    % common Scanbox/Neurolabware community convention): sbxread(fname, k,
+    % N) returns frames k..k+N-1 (k is 0-INDEXED) as a 4D array
+    % [nChannels x nRows x nCols x N]. If your version returns a different
+    % dimension order (e.g. [nRows x nCols x nChannels x N], or a single
+    % channel already selected, or frames along dim 1), fix ONLY this
+    % function -- everything downstream just expects a plain 2D double
+    % image back from it.
     chanStack = squeeze(raw(chan, :, :, :));   % -> [nRows x nCols x N]
     img2d = double(mean(chanStack, 3));
 end
