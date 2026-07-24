@@ -27,7 +27,9 @@ side by side:
      inspect_registration_pair.py)
   3. mov shifted via FFT-based phase correlation -- NOT elastix, just a
      coarse global-translation estimate cross-validated against a
-     synthetic-shift test in this project's preflight_registration_check.m
+     synthetic-shift test in this project's preflight_registration_check.m (now
+     shared via registration_qc_utils.phase_correlation_shift, also used by
+     registration_quality_scan.py's flagged-pair follow-up check)
      (same sign convention, transplanted here)
 
 If (3)'s SSIM is clearly higher than (2)'s, and the recovered shift is
@@ -61,7 +63,8 @@ import matplotlib.pyplot as plt
 
 from track2p.ops.default import DefaultTrackOps
 from track2p.register.elastix import reg_img_elastix
-from registration_qc_utils import load_mean_img as _load_mean_img, norm01 as _norm01, signal_mask, masked_ssim
+from registration_qc_utils import (load_mean_img as _load_mean_img, norm01 as _norm01, signal_mask,
+                                    masked_ssim, phase_correlation_shift)
 
 
 def _resolve_session(all_ds_path, spec, arg_name):
@@ -79,26 +82,6 @@ def _resolve_session(all_ds_path, spec, arg_name):
             f"Use a more specific date/substring, or the numeric 0-indexed position instead."
         )
     return matches[0]
-
-
-def phase_correlation_shift(ref_img, mov_img):
-    """Estimate the best-fit global (row_shift, col_shift) that aligns
-    mov_img onto ref_img via FFT-based phase correlation. Apply via:
-        aligned = np.roll(np.roll(mov_img, row_shift, axis=0), col_shift, axis=1)
-    Sign/wraparound convention matches preflight_registration_check.m's
-    rigidAlignStack() -- cross-validated there against a synthetic-shift
-    round-trip test before being transplanted here.
-    """
-    n_rows, n_cols = ref_img.shape
-    ref_fft = np.fft.fft2(ref_img)
-    mov_fft = np.fft.fft2(mov_img)
-    cross_power = (ref_fft * np.conj(mov_fft)) / (np.abs(ref_fft * np.conj(mov_fft)) + np.finfo(float).eps)
-    corr_img = np.abs(np.fft.ifft2(cross_power))
-    row_idx, col_idx = np.unravel_index(np.argmax(corr_img), (n_rows, n_cols))
-
-    row_shift = row_idx - n_rows if row_idx > n_rows / 2 else row_idx
-    col_shift = col_idx - n_cols if col_idx > n_cols / 2 else col_idx
-    return int(row_shift), int(col_shift)
 
 
 def main():

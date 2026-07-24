@@ -42,6 +42,21 @@ floor flag is a trigger for visual confirmation via
 inspect_registration_pair.py, not an auto-exclude verdict -- masked SSIM's
 absolute calibration still isn't fully trusted (see registration_qc_utils.py).
 
+Any flagged pair also gets a cheap follow-up check: an FFT phase-
+correlation shift estimate (registration_qc_utils.phase_correlation_shift),
+which -- unlike elastix's gradient-descent optimizer -- isn't sensitive to
+displacement magnitude, so it can recover a large shift elastix's default
+optimizer couldn't find from its starting point ("capture-range failure").
+If phase correlation scores notably better than elastix did on a flagged
+pair, that's a real, previously-unsuspected explanation worth knowing
+before you conclude the pair is genuinely misaligned: the underlying data
+may line up fine, elastix's search just failed. This surfaced for real on
+wehr5917's session 6->7 pair (elastix SSIM 0.031, phase-corr SSIM 0.591,
+64px recovered shift, confirmed visually) -- see debug_large_displacement.py
+for the single-pair deep-dive version of this same check. Only run for
+FLAGGED pairs, not the whole list, since it's only informative once
+something already looks wrong -- pass --no-phase-corr-check to skip it.
+
 Also writes a grid PNG (one row per pair) so you can screen the whole
 session list visually in one image instead of opening N-1 separate
 inspect_registration_pair.py outputs. Each row shows:
@@ -94,10 +109,11 @@ from track2p.register.elastix import reg_img_elastix
 
 from screen_sessions import robust_z  # same median/MAD z-score used for cell count / sharpness
 from session_order_utils import load_all_ds_path, ensure_chronological_order
-from registration_qc_utils import load_mean_img as _load_mean_img, norm01 as _norm01, signal_mask, masked_ssim
+from registration_qc_utils import (load_mean_img as _load_mean_img, norm01 as _norm01, signal_mask,
+                                    masked_ssim, phase_correlation_shift)
 
 
-def _build_grid(pairs_data, labels, scores, z, flagged, z_thresh, ssim_floor, middle_panel, plane, out_path, panel_size, dpi):
+def _build_grid(pairs_data, labels, scores, z, flagged, z_thresh, ssim_floor, middle_panel, plane, out_path, panel_size, dpi, phase_corr_info=None):
     """pairs_data[i] = (ref_n, mov_raw_n, mov_reg_n, overlay) for pair i -> i+1."""
     n_pairs = len(pairs_data)
     fig, axes = plt.subplots(n_pairs, 3, figsize=(3 * panel_size, n_pairs * panel_size),
@@ -122,6 +138,10 @@ def _build_grid(pairs_data, labels, scores, z, flagged, z_thresh, ssim_floor, mi
 
         row_label = (f'{i}→{i+1}\n{labels[i]}\n→{labels[i+1]}\n'
                      f'SSIM={scores[i]:.3f}\nz={z[i]:.1f}' + ('\nLOW_ALIGNMENT' if row_flagged else ''))
+        if phase_corr_info and i in phase_corr_info:
+            _, _, ssim_pc, likely_capture_range = phase_corr_info[i]
+            if likely_capture_range:
+                row_label += f'\nphase-corr={ssim_pc:.3f}\nCAPTURE-RANGE?'
         ax_ref.set_ylabel(row_label, rotation=0, ha='right', va='center', fontsize=7.5,
                            color=color, fontweight=weight, labelpad=8)
 
@@ -162,6 +182,9 @@ def main():
     parser.add_argument('--no-grid', action='store_true',
                          help='skip building the grid PNG, just print the table (faster on a long session list '
                               'if you only want the numbers)')
+    parser.add_argument('--no-phase-corr-check', action='store_true',
+                         help='skip the phase-correlation capture-range follow-up check on flagged pairs '
+                              '(see module docstring)')
     parser.add_argument('--middle-panel', choices=['mov_raw', 'mov_reg'], default='mov_raw',
                          help='which mov image to show in the grid\'s middle column -- raw (BEFORE registration, '
                               'default) or registered (AFTER). See module docstring for the trade-off; the overlay '
@@ -243,15 +266,43 @@ def main():
     else:
         print('No pairs flagged -- registration alignment looks consistent across the whole list.')
 
+    phase_corr_info = {}  # i -> (row_shift, col_shift, ssim_pc, likely_capture_range)
+    if suspects and not args.no_phase_corr_check:
+        print('\n' + '=' * 70)
+        print('Phase-correlation follow-up on flagged pair(s) (checks for a capture-range failure --')
+        print('see module docstring):')
+        for i, k, ref_lbl, mov_lbl, score, zscore, reasons in suspects:
+            ref_img = _load_mean_img(all_ds_path[i], args.plane)
+            mov_img = _load_mean_img(all_ds_path[k], args.plane)
+            row_shift, col_shift = phase_correlation_shift(ref_img, mov_img)
+            mov_img_pc = np.roll(np.roll(mov_img, row_shift, axis=0), col_shift, axis=1)
+            mask = signal_mask(ref_img)
+            ssim_pc = masked_ssim(_norm01(ref_img), _norm01(mov_img_pc), mask)
+            likely_capture_range = ssim_pc > score + 0.1
+            phase_corr_info[i] = (row_shift, col_shift, ssim_pc, likely_capture_range)
+
+            shift_mag = float(np.hypot(row_shift, col_shift))
+            print(f'  {i}->{k} ({ref_lbl} -> {mov_lbl}): elastix SSIM={score:.3f}  '
+                  f'phase-corr SSIM={ssim_pc:.3f}  (shift row={row_shift:+d}px col={col_shift:+d}px, '
+                  f'{shift_mag:.0f}px total)')
+            if likely_capture_range:
+                print(f'      ==> phase-corr notably better -- possible CAPTURE-RANGE failure, not '
+                      f'necessarily genuine misalignment. Run debug_large_displacement.py --ref {i} --mov {k} '
+                      f'for the full visual comparison before concluding this session is bad.')
+        print('\nA capture-range failure means the underlying data likely aligns fine -- elastix\'s default')
+        print('optimizer just could not find the shift from its starting point. That\'s a reason to dig')
+        print('into registration settings (or just exclude the session, if not worth chasing), NOT the same')
+        print('conclusion as a pair that phase correlation ALSO can\'t align.')
+
     if not args.no_grid:
         out_path = args.grid_out if args.grid_out is not None else os.path.join(
             args.save_path, 'diagnostics', 'registration_quality_grid.png')
         _build_grid(pairs_data, labels, scores, z, flagged, args.z_thresh, args.ssim_floor, args.middle_panel,
-                    args.plane, out_path, args.panel_size, args.dpi)
+                    args.plane, out_path, args.panel_size, args.dpi, phase_corr_info)
         print(f'\nSaved grid PNG: {os.path.abspath(out_path)}')
         print('One row per pair -- ref / mov-before-reg / overlay by default (--middle-panel mov_reg to swap the '
               'middle column). Flagged rows (|z| >= threshold OR SSIM <= floor) have a red label and red panel '
-              'borders.')
+              'borders; rows with a likely capture-range failure additionally note it in the label.')
 
 
 if __name__ == '__main__':
