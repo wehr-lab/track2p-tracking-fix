@@ -94,10 +94,19 @@ def compare(vanilla_mm, gap_mm, plane_idx):
         print('      That is consistent with the gap fallback never actually triggering (a bug),')
         print('      not with "gap registration was tried and failed" -- worth checking your run')
         print('      log for "[gap] registered session X -> session Y" lines to confirm either way.')
-    elif improved > 0 and n_near_miss_completed == 0:
-        print('  ==> gap-tolerant helped some rows partially but rescued none of the near-misses fully --')
-        print('      check whether some OTHER transition (not the known pair6/7 weak spot) is also failing')
-        print('      for those specific rows, or whether max_gap is too small to bridge it.')
+
+    if n_near_miss > 0 and n_near_miss_completed == 0:
+        print(f'  ==> 0 of {n_near_miss} near-miss row(s) rescued -- this is EXPECTED, not diagnostic of')
+        print('      a problem. Vanilla chaining is forward-only/permanently-truncating, so being exactly')
+        print('      1 session short under vanilla can ONLY mean missing the LAST session in the list --')
+        print('      and gap-tolerant can never rescue a last-session failure, at any max_gap, since there')
+        print('      is no downstream session left to skip forward onto. This will read 0 on every')
+        print('      dataset; do not read it as evidence of a weak transition or an undersized max_gap.')
+        if n_holes > 0:
+            print(f'      Gap-tolerant DID fire elsewhere ({n_holes} row(s) with a genuine mid-track hole) --')
+            print('      if THOSE still fall short of strict-AND, that is the thread worth pulling: check')
+            print('      screen_sessions.py / registration_quality_scan.py / missing_session_histogram.py')
+            print('      on this run for a specific mid-chain session responsible.')
 
 
 def main():
