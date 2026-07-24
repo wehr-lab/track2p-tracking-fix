@@ -305,17 +305,31 @@ def main():
     # ---- everything else: copy unchanged, warn if that's now misaligned ----
     per_roi_files = {'F.npy', 'Fneu.npy', 'spks.npy', 'redcell.npy'}
     copied_per_roi = []
+    skipped_dirs = []
     for fname in os.listdir(plane_dir):
         if fname in ('ops.npy', 'stat.npy', 'iscell.npy'):
+            continue
+        src = os.path.join(plane_dir, fname)
+        if os.path.isdir(src):
+            # e.g. suite2p's reg_tif/ (registered movie frames) -- not a
+            # single file copyfile() can handle, and not needed for
+            # track2p's matching (which only touches ops.npy's meanImg +
+            # stat.npy/iscell.npy) anyway, so skipped rather than an
+            # expensive recursive copytree of movie data nothing here uses.
+            skipped_dirs.append(fname)
             continue
         # copyfile(), not copy2() -- copy2() also tries to replicate metadata
         # (mtime, macOS chflags, ...) via copystat(), which can raise
         # PermissionError when the source and destination are on different
         # volume types (e.g. a network-mounted source, local disk dest) --
         # confirmed on real data. File CONTENT is all that's needed here.
-        shutil.copyfile(os.path.join(plane_dir, fname), os.path.join(out_plane_dir, fname))
+        shutil.copyfile(src, os.path.join(out_plane_dir, fname))
         if fname in per_roi_files:
             copied_per_roi.append(fname)
+
+    if skipped_dirs:
+        print(f'Skipped subdirector(ies) {skipped_dirs} (e.g. registered-movie frames) -- not needed for '
+              f'track2p\'s matching, not copied.')
 
     if n_dropped > 0 and copied_per_roi:
         print(f'\nWARNING: {n_dropped} ROI(s) were dropped from stat.npy/iscell.npy, but {copied_per_roi} '
