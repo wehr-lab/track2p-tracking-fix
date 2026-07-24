@@ -146,8 +146,17 @@ def shift_stat(stat, row_shift, col_shift, n_rows, n_cols):
 
     for roi_idx, roi in enumerate(stat):
         roi = dict(roi)  # shallow copy -- don't mutate the original in place
-        ypix_new = roi['ypix'] + row_shift
-        xpix_new = roi['xpix'] + col_shift
+        # Cast to a signed 64-bit dtype BEFORE adding the shift, explicitly --
+        # ypix/xpix are commonly stored as an unsigned dtype (uint16 is a
+        # common suite2p convention), and array(uint16) + negative_python_int
+        # is NOT safe to assume: depending on numpy version, it either raises
+        # OverflowError outright (numpy>=2.0's NEP 50 scalar-promotion rules)
+        # or silently wraps around to a huge value (older numpy in some
+        # code paths) -- confirmed both failure modes empirically before
+        # adding this cast. Either way, an in-bounds check against a wrapped
+        # or crashed value would be silently wrong, not loudly wrong.
+        ypix_new = roi['ypix'].astype(np.int64) + row_shift
+        xpix_new = roi['xpix'].astype(np.int64) + col_shift
         in_bounds = (ypix_new >= 0) & (ypix_new < n_rows) & (xpix_new >= 0) & (xpix_new < n_cols)
 
         if not np.any(in_bounds):
@@ -195,8 +204,14 @@ def main():
                               'raw, no shift) required to proceed -- refuses to write output below this, since '
                               'that means phase correlation likely did not find a real fix. Default 0.1, same '
                               'threshold registration_quality_scan.py\'s flagged-pair follow-up uses.')
+    parser.add_argument('--min-roi-keep-frac', type=float, default=0.5,
+                         help='minimum fraction of ROIs that must survive the shift (i.e. stay in-bounds) to '
+                              'proceed -- applies in BOTH auto-detect and manual mode. A real translation-only '
+                              'capture-range fix should only lose ROIs in a narrow edge band, so a big drop is '
+                              'a strong signal something is wrong (wrong shift, wrong image dims, a dtype bug) '
+                              'rather than a real edge effect. Default 0.5 (refuse if more than half is lost).')
     parser.add_argument('--force', action='store_true',
-                         help='write output even if the --min-ssim-gain check fails (auto-detect mode only)')
+                         help='write output even if the --min-ssim-gain or --min-roi-keep-frac check fails')
     parser.add_argument('--plane', type=int, default=0)
     parser.add_argument('--out', required=True, help='output session folder (created fresh; original untouched)')
     args = parser.parse_args()
@@ -209,6 +224,16 @@ def main():
     if args.ref is None and not manual:
         raise ValueError('Pass either --ref /path/to/ref_session_dir (auto-detect) or '
                           '--row-shift N --col-shift N (manual).')
+
+    for label, p in [('session_dir', args.session_dir), ('--ref', args.ref)]:
+        if p is not None and 'matched_suite2p' in os.path.normpath(p).split(os.sep):
+            msg = (f'{label}={p!r} runs through a "matched_suite2p" folder -- that\'s track2p\'s own '
+                   f'regenerated output from a PRIOR run (only cells that survived the ENTIRE chain in that '
+                   f'run, not the session\'s real ROI set), not raw suite2p data. You almost certainly want '
+                   f'the original raw session directory instead (same convention find_session_dirs() expects).')
+            if not args.force:
+                raise SystemExit(f'Refusing to proceed: {msg} Pass --force if this is really what you meant.')
+            print(f'WARNING (--force): {msg}')
 
     plane_dir = os.path.join(args.session_dir, 'suite2p', f'plane{args.plane}')
     if not os.path.isdir(plane_dir):
@@ -257,8 +282,18 @@ def main():
     stat = np.load(os.path.join(plane_dir, 'stat.npy'), allow_pickle=True)
     n_rows, n_cols = ref_shape
     new_stat, keep_mask, n_dropped, n_clipped = shift_stat(stat, row_shift, col_shift, n_rows, n_cols)
-    print(f'stat.npy: {len(stat)} ROI(s) -> {len(new_stat)} kept, {n_dropped} dropped entirely '
+    keep_frac = len(new_stat) / len(stat) if len(stat) > 0 else 1.0
+    print(f'stat.npy: {len(stat)} ROI(s) -> {len(new_stat)} kept ({keep_frac:.1%}), {n_dropped} dropped entirely '
           f'(shifted fully out of bounds), {n_clipped} had some pixels clipped')
+    if keep_frac < args.min_roi_keep_frac and not args.force:
+        raise SystemExit(
+            f'Refusing to write output: only {keep_frac:.1%} of ROIs survived the shift, below '
+            f'--min-roi-keep-frac ({args.min_roi_keep_frac:.0%}). A real translation-only fix should only lose '
+            f'ROIs in a narrow edge band -- this magnitude of loss usually means the shift, image dimensions, '
+            f'or ypix/xpix dtype handling is wrong, not a real edge effect. Nothing was written. Check the '
+            f'shift value and image dimensions before retrying, or pass --force if you\'ve independently '
+            f'confirmed this is expected.'
+        )
     np.save(os.path.join(out_plane_dir, 'stat.npy'), np.array(new_stat, dtype=object), allow_pickle=True)
 
     iscell_path = os.path.join(plane_dir, 'iscell.npy')
