@@ -1,6 +1,6 @@
 # track2p tracking-failure workflow
 
-Reusable procedure for diagnosing and recovering yield on a track2p run, built from the wehr5336 1-9 session investigation. Re-run this same sequence for the 13- and 18-session checkpoints, and for any other mouse.
+Reusable procedure for diagnosing and recovering yield on a track2p run, built from the wehr5336 1-9 session investigation and confirmed to generalize on a second mouse (wehr5917). Re-run this same sequence for new session-count checkpoints, and for any other mouse.
 
 All scripts are session-count-agnostic; just point them at new `save_path` directories.
 
@@ -13,6 +13,20 @@ python track_ops_config.py --export "/path/to/some/existing/track2p/track_ops.np
 ```
 
 Edit `track2p_settings.cfg` by hand if a setting ever needs to change. Every launcher script below prefers `TRACK_OPS_CFG` pointed at this file; `SETTINGS_SOURCE_PATH` (borrowing straight from an existing `track_ops.npy`) still works as a legacy fallback.
+
+## Pre-acquisition check (optional, prevents the problem instead of cleaning up after it)
+
+`preflight_registration_check.m` (MATLAB) checks FOV alignment against a reference session BEFORE committing to a full longitudinal acquisition + suite2p run. Reads a short (~1000 frame, configurable) raw `.sbx` clip plus the reference session's own raw `.sbx` file directly -- no suite2p processing needed for either one, since the rig computer may not have suite2p output available/reachable at check time, and there's no guarantee a same-day reference session has finished processing yet. Runs entirely in MATLAB, shelling out to a standalone `elastix` CLI install (via a one-time-exported parameter file from `export_elastix_params.py`) rather than bridging to Python at check-time, so the rig needs zero Python.
+
+Setup once (or whenever `track_ops.transform_type` changes), from the track2p conda env:
+```
+python export_elastix_params.py --cfg track2p_settings.cfg elastix_params.txt
+```
+Copy `elastix_params.txt` to the rig; point `ELASTIX_PARAMS_FILE` at it. See that script's own docstring for a real caveat: it's SimpleElastix's standard parameter map for your transform type, not a verified line-for-line match to `reg_img_elastix.py`'s actual settings -- diff the two by hand once.
+
+**Known Windows gotcha, confirmed on real rig hardware:** MATLAB's `system()` call can fail to find `elastix` on PATH even when a fresh terminal finds it fine -- MATLAB inherits the environment from when it launched, so a PATH edit made afterward (or in a different scope) silently doesn't apply. Set `ELASTIX_BIN` in the script's config to the FULL PATH to `elastix.exe` (find it via `where elastix` in a working terminal) rather than relying on PATH at all -- the script also detects this specific failure and prints a targeted message if it happens anyway.
+
+Optional `DO_MOTION_CORRECTION` config flag rigid-aligns frames (FFT phase correlation) before averaging each short clip, since raw `.sbx` frames aren't suite2p-registered the way a real `meanImg` would be -- off by default, worth turning on if within-session jitter blur turns out to matter for your rig/data.
 
 ## 0. Build your session list and run a cheap vanilla-equivalent pass
 
@@ -51,6 +65,8 @@ All signals from `screen_sessions.py` are available immediately after step 0 (ce
 
 **Run `registration_quality_scan.py` every time too, not just when something's already flagged.** It measures something `screen_sessions.py`'s neighbor rate structurally cannot: neighbor rate comes from Otsu thresholding applied per-pair, which just finds *a* locally-separable split in that pair's IOU distribution — it has no absolute reference for what a real match looks like, so a uniformly bad registration can still produce a plausible-looking match rate if Otsu finds *some* threshold, even when the "matches" are essentially noise. This is exactly how a genuinely broken transition (near-zero image-level overlap, confirmed visually) slipped past `screen_sessions.py` entirely on a real run, while `registration_quality_scan.py`'s SSIM score caught it. The two tools are checking different things and neither subsumes the other — always run both.
 
+**Any pair `registration_quality_scan.py` flags also gets an automatic phase-correlation follow-up** — a cheap FFT-based check (not sensitive to displacement magnitude the way elastix's gradient-descent optimizer is) for whether the failure is a *capture-range* problem (the true displacement is large but the data actually aligns fine — elastix's optimizer just couldn't find it from its starting point) rather than genuine misalignment. A `CAPTURE-RANGE?` annotation on a flagged grid row means this — worth checking before assuming the session itself is bad. This surfaced for real on wehr5917's session 6->7 pair (elastix SSIM 0.031, phase-corr SSIM 0.591, 64px recovered shift, confirmed visually) — see below for what to do about a confirmed capture-range failure.
+
 ## 2. Visually confirm suspects
 
 ```
@@ -61,6 +77,17 @@ This writes `session_qc_images.png` (mean image per session, 1st-99th percentile
 (`export_session_qc.py` + `compare_session_qc.m` still work if you'd rather do this step in MATLAB — `compare_session_qc.py` reads the same suite2p output directly instead of round-tripping through a `.mat` file, but the two checks are the same.)
 
 **If `registration_quality_scan.py` flagged a pair, also run `inspect_registration_pair.py` on it before deciding anything.** `export_session_qc.py` only shows each session's own raw mean image side by side, which cannot reveal a registration/alignment problem — a session can look completely normal in isolation (fine cell count, sharp image) while genuinely failing to register against its neighbor. This has gone both directions in practice: it's caught a session that looked fine in isolation but had a real alignment failure, and it's the only thing that can confirm (or rule out) a flag from `registration_quality_scan.py`, whose absolute SSIM values aren't yet well-calibrated enough to trust without a visual check.
+
+**If the flag looks like a capture-range failure (`CAPTURE-RANGE?` in the grid, or a notably higher phase-corr SSIM than elastix's), confirm with `debug_large_displacement.py --ref <i> --mov <k>`** — same idea as `inspect_registration_pair.py` but runs elastix and phase correlation side by side, with an overlay panel for each, so you can see directly whether the phase-corr alignment looks genuinely good (yellow/white) rather than trusting the SSIM numbers alone.
+
+**A confirmed capture-range failure doesn't have to mean excluding the session.** Since the underlying data aligns fine — elastix's optimizer just couldn't find the shift — `apply_shift_correction.py` pre-corrects the affected session's suite2p output (its `meanImg` and ROI pixel coordinates) by the phase-correlation-recovered shift *before* track2p ever registers it, so track2p's own elastix call only has to handle the small residual instead of the full displacement:
+```
+python apply_shift_correction.py /path/to/mov_session_dir --ref /path/to/ref_session_dir --plane 0 \
+    --out /path/to/mov_session_dir_shift_corrected
+```
+It computes the shift itself (same phase correlation as above) and refuses to write output if the correction doesn't show a real improvement (`--min-ssim-gain`, default 0.1 — `--force` to override once you've confirmed visually despite a marginal number). Point `ALL_DS_PATH` at the corrected folder in place of the original for your next run. Worth doing the arithmetic before deciding whether it's worth the extra step: back-solve how many strict-AND cells the fix would plausibly recover (see wehr5917's 6->7 case in `SESSION_LOG.md` for the method) — sometimes it's a large gain, sometimes it genuinely doesn't matter (e.g. a last-session failure that gap-tolerant chaining couldn't have used anyway — see the structural facts below).
+
+Only ONE session in a pair should ever need correcting, not both — pick whichever one is more convenient (e.g. whichever already has suite2p output, or whichever isn't itself also implicated in a DIFFERENT flagged pair). If chaining this with an exclusion round on a DIFFERENT session (via step 3 below), substitute the corrected path by date/substring match, not list index — excluding an earlier session shifts every later session's position.
 
 ## 3. Exclude confirmed bad sessions, one at a time
 
@@ -113,7 +140,8 @@ Read the "proj. survive to end" column relative to how many transitions remain f
 ## Known structural facts worth remembering mid-analysis
 
 - Vanilla track2p's chaining is permanently-truncating and forward-only: a cell's "sessions present" is always a contiguous run starting at session 0. There is no such thing as a vanilla row with a gap in the middle.
-- Gap-tolerant chaining can only skip forward over a bad transition — it can never recover a failure at the very last session in the list, no matter how large `max_gap` is.
+- Gap-tolerant chaining can only skip forward over a bad transition — it can never recover a failure at the very last session in the list, no matter how large `max_gap` is. Consequence, proven not just observed: since vanilla chaining is always a contiguous prefix, being "1 session short" under vanilla can ONLY mean missing the last session — so "0 of N near-miss rows rescued" from `compare_gap_vs_vanilla.py` is mathematically guaranteed whenever any near-miss rows exist, on every dataset, regardless of `max_gap` or any other transition's quality. Confirmed independently on both wehr5336 (`03-10-26`) and wehr5917. Don't chase it as a data-quality signal — `compare_gap_vs_vanilla.py`'s own printed hint accounts for this now.
+- A pair can be flagged as misaligned for two different reasons that need different fixes: genuine misalignment (data doesn't actually line up — exclude a session) vs. a capture-range failure (data aligns fine, elastix's gradient-descent optimizer just couldn't find a large-enough shift — `apply_shift_correction.py` can fix this without losing the session). `registration_quality_scan.py`'s automatic phase-correlation follow-up on flagged pairs (see step 1) distinguishes the two.
 - Any row that needed even one gap-jump anywhere in its chain has a permanent hole at the skipped session, so it can never count toward strict-AND completion — this is why gap-tolerant chaining's own strict-AND count is always identical to vanilla's, and why fix #3's K<N counts are the real measure of gap-tolerant chaining's benefit.
 - The track2p GUI never sorts sessions by date — a list built across more than one GUI session can silently end up chronologically out of order, which corrupts registration since track2p only compares list-adjacent sessions. `find_session_dirs()` + `ensure_chronological_order()` (baked into both launcher scripts) catch and fix this automatically.
 - Watch for `ALL_DS_PATH` accidentally pointing at a `matched_suite2p` folder instead of raw data — it mirrors real session folder names exactly, so glob/date matching alone won't catch it. `find_session_dirs()`'s sanity check does.

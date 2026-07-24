@@ -4,6 +4,57 @@ Running log of work sessions on the track2p tracking-fix project. Newest entries
 
 ---
 
+## 2026-07-23
+
+### New tool: `preflight_registration_check.m` -- catch bad FOV alignment BEFORE a full session
+
+- Prototyped a MATLAB script to check FOV alignment against a reference session using a short (~1000 frame) raw acquisition, before committing to a full longitudinal session + suite2p run. Runs entirely in MATLAB, shells out to a standalone `elastix` CLI via a one-time-exported parameter file (`export_elastix_params.py`, needs the `SimpleITK-SimpleElastix` PyPI package -- distinct from plain `SimpleITK`) -- no Python needed on the rig itself.
+- Iterated the reference-image source twice: first via a new `export_reference_mhd.py` (suite2p `ops.npy` -> `.mhd`, replacing an earlier `.mat`-round-trip design), then simplified further once it became clear the rig may not have suite2p output available/reachable at check time at all -- now reads BOTH the reference and the new short clip directly from raw `.sbx` files (`REF_SBX_PATH`/`NEW_SBX_PATH`, absolute paths since sessions live in separate folders; `REF_N_FRAMES`/`NEW_N_FRAMES`).
+- Added optional rigid (translation-only) motion correction (`DO_MOTION_CORRECTION` flag) for the raw-frame averaging, via FFT phase correlation -- since raw `.sbx` frames aren't suite2p-registered the way a real `meanImg` would be. **Caught a real sign bug before it ever touched real data**: validated the phase-correlation shift/application math against a synthetic-shift round-trip test in Python first, found the initial `circshift` sign was backwards (would have doubled misalignment instead of correcting it), fixed before writing to the `.m` file.
+- Field-tested on the real Windows rig computer (wehr5913) -- two genuine environment bugs surfaced:
+  - MATLAB's `system()` doesn't see PATH changes made after MATLAB launched (confirmed: `elastix --version` worked in a fresh terminal, failed inside MATLAB). Documented + now detected with a targeted error message; fix is pointing `ELASTIX_BIN` at the full path to `elastix.exe` rather than relying on PATH.
+  - Once PATH was fixed, elastix itself crashed with exit code `-1073741819` (`0xC0000005` / `STATUS_ACCESS_VIOLATION`, Windows' segfault) -- **not yet resolved end-to-end**. Same underlying mechanism established below (large displacement exceeding elastix's capture range) is a plausible lead, not yet confirmed for this specific crash.
+
+### Second-mouse validation: wehr5917 (8 sessions, 1 of 9 excluded)
+
+- First real run of the established workflow on a second mouse. First hiccup: used `load_all_ds_path()` (reads a session list back out of an *existing* track2p run) instead of `find_session_dirs()` (scans *raw* data) for a brand-new mouse with no prior run -- `FileNotFoundError: No track_ops.npy`. Documented the distinction clearly in `track2p_fix_workflow.md` so this doesn't recur.
+- `compare_gap_vs_vanilla.py` / `fix3_partial_tracks.py`: strict-AND(8) = 1 (of 428 candidate ROIs), K=7 recommended (86 cells). 0 of 65 near-miss rows rescued by gap-tolerant chaining.
+- **Diagnosed the "0/65 rescued" result as mathematically guaranteed, not a data problem**: vanilla chaining is always a contiguous prefix, so "1 session short" under vanilla can only mean missing the LAST session -- and gap-tolerant can never rescue a last-session failure (nothing downstream to skip to), regardless of `max_gap`. `compare_gap_vs_vanilla.py`'s own hint was printing a misleading "check other transitions / max_gap too small" suggestion in exactly this always-true case -- fixed to print the correct structural explanation instead, and redirect to the genuinely open question (the 81 rows gap-tolerant DID partially improve, which do reflect a real mid-chain issue).
+- `screen_sessions.py` flagged sessions 6 and 7 (last); session 7 additionally flagged `BAD_NEIGHBOR_TRANSITIONS`. Session 7's own data (cell count 565, sharpness the highest in the list) ruled out "just bad data." Backed out session 6's two neighbor-transition rates from its reported average (36.5%): 5->6 = 71.6% (healthy, matches the rest of the list), 6->7 = 1.4% (session 7's own rate, since it's last and only has one neighbor) -- isolated entirely to the 6->7 transition.
+
+### New diagnostic: capture-range failure vs. genuine misalignment
+
+- User's hypothesis: the 6->7 displacement might simply be too large for elastix's gradient-descent optimizer to converge on, distinct from the data genuinely not aligning.
+- Built `debug_large_displacement.py`: registers a specific pair both ways -- track2p's actual `reg_img_elastix()` call, and an FFT-based phase-correlation shift estimate (not sensitive to displacement magnitude the way a gradient-descent optimizer is) -- and compares masked SSIM + overlays side by side. Validated against a synthetic 45px/60px-shift mock with a stubbed `reg_img_elastix` before running for real.
+- **Confirmed on real data**: elastix SSIM 0.031, phase-correlation SSIM 0.591, 64px recovered shift (row=+2px, col=-64px -- essentially a pure lateral FOV recenter). User confirmed visually: phase-corr overlay "mostly yellow." Real capture-range failure, not genuine misalignment.
+- **Corrected an earlier mistaken claim of mine**: initially said fixing this transition "wouldn't meaningfully change the usable cell count" -- wrong, walked back after actually doing the arithmetic. Of 66 cells that survive cleanly through session 6, only 1 also survives 6->7 (1.5% pass-through, consistent with the 1.4% neighbor rate). If 6->7 performed like the rest of the list (~65-75%), strict-AND(8) would plausibly be ~46 cells instead of 1 -- a real, worth-pursuing gain, not a wash.
+- Baked the phase-correlation check directly into `registration_quality_scan.py`'s normal screening pass: any flagged pair now automatically gets the follow-up (shared `phase_correlation_shift()` helper moved into `registration_qc_utils.py`, used by both scripts), surfaced in the printed report and as a `CAPTURE-RANGE?` annotation on flagged grid rows. Validated end-to-end against a mock 4-session list with a simulated capture-range failure before shipping.
+
+### New tool: `apply_shift_correction.py` -- fixing a capture-range failure without losing the session
+
+- Since `reg_img_elastix.py`'s source isn't available in this project to patch its optimizer/capture-range settings directly, the pragmatic fix is pre-correcting the DATA: translate the affected session's `ops.npy` `meanImg` and `stat.npy` ROI coordinates (`ypix`/`xpix`/`med`) by the already-confirmed shift before track2p ever registers it, so track2p's own elastix call only has to handle the small residual.
+- Deliberately scoped to just the spatial fields track2p's IOU-based matching actually uses -- confirmed real `stat.npy` field names against an uploaded sample first (`ypix`, `xpix`, `lam`, `med`, `neuropil_mask`, plus various shape/quality scalars). `neuropil_mask` (fluorescence neuropil subtraction, not spatial matching) and per-ROI fluorescence files (`F.npy`/`Fneu.npy`/`spks.npy`) deliberately left untouched -- a loud warning prints if any ROI gets dropped, since that's the one case those files would fall out of index-alignment with the corrected `stat.npy`/`iscell.npy`.
+- ROIs shifted fully out of the valid image bounds are dropped (with `iscell.npy` kept aligned); partially-out-of-bounds ROIs are clipped rather than wrapped (unlike the diagnostic phase-corr check's circular roll, which is fine for a quick SSIM sanity check but not for real cell positions).
+- Upgraded to auto-compute the shift via phase correlation against a `--ref` session directly (no more copy-pasting numbers from `debug_large_displacement.py`'s output), with a safety gate (`--min-ssim-gain`, default 0.1) that refuses to write output if phase correlation doesn't show a real improvement -- `--force` to override once confirmed visually. Kept `--row-shift`/`--col-shift` as a manual-override path.
+- Validated all three modes (auto-detect, manual override, safety-gate correct-refusal) against a mock harness exercising kept/clipped/dropped ROI cases and the non-circular edge zero-fill on `meanImg`.
+- Discussed chaining this with an exclusion round on a DIFFERENT session (e.g. session 4): safe to do in either order since they're orthogonal fixes on different sessions, but substitute the corrected path by date/substring match, not list index -- excluding an earlier session shifts every later session's position.
+
+### End of day: production run launched, not yet checked
+
+- `python run_gap_tolerant.py` failed with `ModuleNotFoundError: No module named 'itk'` -- turned out to be a dropped `conda activate track2p`, not an actual missing dependency (track2p's real `register/elastix.py` imports `itk`/`itk-elastix` directly, a different package from the `SimpleITK-SimpleElastix` this repo's own diagnostic tooling uses).
+- **`run_gap_tolerant.py` was launched for wehr5917 and left running at end of day.** Settings used for this specific run were NOT confirmed in this conversation -- check tomorrow whether the shift-corrected session 7 (from `apply_shift_correction.py` above) was actually substituted into `ALL_DS_PATH`, and whether a session-4 exclusion was also applied, before interpreting the output.
+
+## Where to pick up tomorrow
+
+1. Check the completed `run_gap_tolerant.py` run -- first confirm what `ALL_DS_PATH` it actually used (shift-corrected session 7? session 4 excluded?) before interpreting anything.
+2. If the shift-corrected session 7 was used: run `screen_sessions.py` / `registration_quality_scan.py` / `compare_gap_vs_vanilla.py` / `fix3_partial_tracks.py` on the new output -- check whether strict-AND(8) actually climbed toward the ~46-cell estimate, and whether the 6->7 pair is clean now.
+3. If NOT: run `apply_shift_correction.py --ref <session 6 dir>` for session 7, substitute into `ALL_DS_PATH`, and re-run.
+4. Decide on session 4 (`06-09-26`, 34.4% missing but not clearly flagged by `screen_sessions.py` so far) -- revisit once 6->7 is resolved; the same "goose chase" stopping-rule mindset from wehr5336's checkpoint applies here.
+5. Still open: the wehr5913 rig crash (`STATUS_ACCESS_VIOLATION` on `preflight_registration_check.m`, separate mouse/thread from the wehr5917 analysis above) -- not yet diagnosed to conclusion. Worth checking whether it's the same large-displacement/capture-range mechanism established for wehr5917's session 6->7, since the fix (`elastix.exe` crashing outright rather than erroring cleanly) is at least consistent with that class of problem.
+6. A `substitute_session_path.py` utility (safe date-substring-based path substitution across exclusion rounds + shift corrections, mirroring `inspect_registration_pair.py`'s `_resolve_session()` convention) was proposed but not built -- revisit if manual list-splicing becomes a recurring annoyance.
+
+---
+
 ## 2026-07-21
 
 ### Round 3 exclusion (session 4 / 12-09-25) -- real, partial win
