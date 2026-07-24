@@ -62,6 +62,7 @@ import sys
 GIT_CLONE_PATH = '/Users/wehr/git/track2p'   # confirm with: python -c "import track2p; print(track2p.__file__)"
 sys.path.insert(0, GIT_CLONE_PATH)
 
+import time
 import numpy as np
 from track2p.ops.default import DefaultTrackOps
 from fix1_gap_tolerant_chain import run_t2p_gap_tolerant
@@ -73,6 +74,7 @@ from run_gap_tolerant_settings import (
 
 
 def main():
+    launcher_start = time.time()
     if TRACK_OPS_CFG is not None:
         track_ops = load_track_ops(TRACK_OPS_CFG)
         if ALL_DS_PATH is None:
@@ -95,6 +97,19 @@ def main():
     track_ops.save_path = NEW_BASE_PATH   # override so this run doesn't collide with the old one
 
     run_t2p_gap_tolerant(track_ops, max_gap=MAX_GAP, n_workers=N_WORKERS)
+
+    # Total wall time for THIS script, start to finish -- includes steps
+    # run_t2p_gap_tolerant() doesn't itself time (session loading, the
+    # consecutive-pair elastix registration loop, final plotting), on top
+    # of the [timing] precompute/chaining breakdown it already prints
+    # internally. For an estimated-time-remaining figure DURING the run
+    # (not just a final total), watch for the '[gap precompute N/M ... ETA'
+    # lines that step already prints while N_WORKERS > 1 -- that's the
+    # single most time-variable phase, so it's the one with a live ETA;
+    # the other steps here don't have a comparable per-item progress signal
+    # to estimate against.
+    launcher_elapsed = time.time() - launcher_start
+    print(f'\n[timing] run_gap_tolerant.py total wall time: {launcher_elapsed / 60:.1f} min ({launcher_elapsed:.0f}s)')
 
 
 # Everything above this guard is safe for a worker process to re-import

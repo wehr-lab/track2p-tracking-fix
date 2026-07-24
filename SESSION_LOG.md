@@ -4,6 +4,26 @@ Running log of work sessions on the track2p tracking-fix project. Newest entries
 
 ---
 
+## 2026-07-24
+
+### Closed out the wehr5917 shift-correction production run
+
+- `ALL_DS_PATH` in `run_gap_tolerant_settings.py` pointed at a stale path twice in a row before the real run succeeded: first it still referenced the FIRST (bad) `apply_shift_correction.py` attempt's output (`.../gap1_x4/track2p/matched_suite2p/06-29-26-000_shift_corrected`, from when the script was mistakenly pointed at `matched_suite2p` -- see 2026-07-23), which was never actually written to completion. Fixed to point at the real corrected output (`.../wehr5917/06-29-26-000_shift_corrected`). Also double-checked whether session 4 needed a separate manual exclusion filter in this settings file -- it didn't: `06-02-26` (the actual excluded session, not `06-09-26` as I'd misremembered from the prior day's summary) was already baked into `ALL_DS_PATH` via `load_all_ds_path('.../gap1_x4/track2p')`, since `run_exclude_session.py` had already produced that filtered list. `run_exclude_session.py` itself did not need to be re-run.
+- **Found and fixed a real bug in `apply_shift_correction.py`**: `F.npy`/`Fneu.npy`/`spks.npy`/`redcell.npy` were being copied UNCHANGED (still indexed by the ORIGINAL, pre-shift ROI count) while `stat.npy`/`iscell.npy` were correctly filtered down to the ROIs that survived the shift. The docstring's claim that this was safe ("track2p's own matching doesn't use these files") turned out to be wrong -- `track2p.t2p.save_in_s2p_format()` does `F[iscell[:,0]==1,:]`, which crashed with `IndexError: boolean index did not match indexed array along dimension 0` (4561 vs. 4249) the first time a real shift-corrected session with dropped ROIs made it that far into the pipeline. Fixed: these four files now get filtered by the same `keep_mask` as `iscell.npy`, with a fallback (copy unchanged + loud warning) if a file's row count doesn't match `stat.npy`'s original length for some other reason.
+- Added elapsed-time reporting to `apply_shift_correction.py` (total wall time, printed at the end of `main()`) and to `run_gap_tolerant.py` (total launcher wall time). Noted for the user that `fix1_gap_tolerant_chain.py` already had fairly thorough phase-level timing (precompute/chaining breakdown, cumulative time across resumed attempts) plus a live per-pair ETA during the parallel gap-precompute step -- didn't duplicate that, since the other steps (session loading, consecutive-pair registration, final plotting) don't have a comparable per-item progress signal to estimate against.
+
+### Result: wehr5917 shift-corrected + gap-tolerant (`gap3sc`, `MAX_GAP=3`) -- real improvement
+
+- `python run_gap_tolerant.py` completed successfully end to end after the fixes above.
+- `fix3_partial_tracks.py`: strict-AND(9) = 6 (up from 1, the pre-shift-correction baseline), on 9 sessions and 1181 candidate session-0 ROIs. K=8 recommended: 17 cells (<=1 session missing). 65 cells survive K=7 (<=2 missing).
+- User flagged a valid caveat: no `MAX_GAP=1` run was ever done WITH the shift-corrected session, so the individual contributions of "shift correction" vs. "gap-tolerant chaining" can't be cleanly separated from this result alone. Doesn't undermine the combined result itself -- just means attribution between the two fixes is still an open question if it matters later (cheap to test: same settings, `MAX_GAP=1`).
+
+## Where to pick up tomorrow
+
+1. If attribution between the shift-correction fix and gap-tolerant chaining matters for writing this up: re-run with `MAX_GAP=1` on the same shift-corrected session list as a control.
+2. Decide whether the `gap3sc` result (strict-AND 6, K=8 recommended) is good enough to hand off downstream, or whether further screening/exclusion rounds (e.g. revisiting session 4 / `06-09-26`, still not conclusively decided) are worth pursuing.
+3. Still open: the wehr5913 rig `STATUS_ACCESS_VIOLATION` crash on `preflight_registration_check.m` -- not diagnosed to conclusion.
+
 ## 2026-07-23
 
 ### New tool: `preflight_registration_check.m` -- catch bad FOV alignment BEFORE a full session

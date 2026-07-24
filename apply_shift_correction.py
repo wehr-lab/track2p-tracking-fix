@@ -70,16 +70,15 @@ aspect_ratio, npix_norm*, skew, std, neuropil_mask):
 
   iscell.npy -- filtered to match any ROIs dropped from stat.npy.
 
-  Everything else found in the plane folder (F.npy, Fneu.npy, spks.npy,
-  redcell.npy, etc., if present) is copied UNCHANGED. These are indexed by
-  ROI order, same as stat.npy/iscell.npy -- if this run happens to drop
-  any ROI, those files silently fall out of index-alignment with the
-  corrected stat.npy/iscell.npy. Track2p's own matching doesn't use them
-  (spatial matching only touches stat.npy/iscell.npy/ops.npy's meanImg),
-  so this is scoped to not matter for THAT purpose -- but this script
-  prints a loud warning if any ROI was actually dropped, since that's the
-  one case where downstream fluorescence-trace analysis on this session
-  would need those files re-aligned by hand.
+  F.npy, Fneu.npy, spks.npy, redcell.npy (per-ROI files, if present) --
+  filtered by the same keep_mask as iscell.npy, so they stay index-aligned
+  with the corrected stat.npy/iscell.npy. (Earlier versions of this script
+  copied these unchanged on the theory that track2p's matching only reads
+  stat.npy/iscell.npy/ops.npy's meanImg -- true for the matching step
+  itself, but track2p's save_in_s2p_format() does F[iscell[:,0]==1,:],
+  which crashes with a shape mismatch if F.npy wasn't dropped in lockstep
+  with iscell.npy. Confirmed on real data.) Everything else in the plane
+  folder is copied unchanged.
 
 Usage (auto-computed shift -- the normal path):
     python apply_shift_correction.py /path/to/mov_session_dir --ref /path/to/ref_session_dir \
@@ -110,6 +109,7 @@ original session folder completely untouched.
 
 import os
 import shutil
+import time
 import argparse
 import numpy as np
 
@@ -188,6 +188,7 @@ def shift_stat(stat, row_shift, col_shift, n_rows, n_cols):
 
 
 def main():
+    t_start = time.time()
     parser = argparse.ArgumentParser()
     parser.add_argument('session_dir', help='mov session folder to correct (contains suite2p/plane{j}/)')
     parser.add_argument('--ref', default=None,
@@ -302,9 +303,14 @@ def main():
         np.save(os.path.join(out_plane_dir, 'iscell.npy'), iscell[keep_mask], allow_pickle=True)
         print(f'iscell.npy: filtered to match ({keep_mask.sum()} row(s) kept)')
 
-    # ---- everything else: copy unchanged, warn if that's now misaligned ----
+    # ---- per-ROI files: filter by keep_mask so they stay index-aligned ----
+    # (F/Fneu/spks/redcell are all indexed by ROI order, same as stat.npy/
+    # iscell.npy -- track2p's save_in_s2p_format() does F[iscell[:,0]==1,:],
+    # which requires F.npy's row count to match iscell.npy's exactly, so
+    # these can't just be copied unchanged if any ROI was dropped.)
     per_roi_files = {'F.npy', 'Fneu.npy', 'spks.npy', 'redcell.npy'}
-    copied_per_roi = []
+    filtered_per_roi = []
+    skipped_per_roi_mismatch = []
     skipped_dirs = []
     for fname in os.listdir(plane_dir):
         if fname in ('ops.npy', 'stat.npy', 'iscell.npy'):
@@ -318,28 +324,40 @@ def main():
             # expensive recursive copytree of movie data nothing here uses.
             skipped_dirs.append(fname)
             continue
+        if fname in per_roi_files:
+            arr = np.load(src, allow_pickle=True)
+            if arr.shape[0] == len(keep_mask):
+                np.save(os.path.join(out_plane_dir, fname), arr[keep_mask], allow_pickle=True)
+                filtered_per_roi.append(fname)
+                continue
+            else:
+                print(f'WARNING: {fname} has {arr.shape[0]} row(s), expected {len(keep_mask)} (stat.npy\'s '
+                      f'original length) -- cannot filter by keep_mask, copying unchanged instead. This file '
+                      f'will be misaligned with the corrected stat.npy/iscell.npy if any ROI was dropped.')
+                skipped_per_roi_mismatch.append(fname)
         # copyfile(), not copy2() -- copy2() also tries to replicate metadata
         # (mtime, macOS chflags, ...) via copystat(), which can raise
         # PermissionError when the source and destination are on different
         # volume types (e.g. a network-mounted source, local disk dest) --
         # confirmed on real data. File CONTENT is all that's needed here.
         shutil.copyfile(src, os.path.join(out_plane_dir, fname))
-        if fname in per_roi_files:
-            copied_per_roi.append(fname)
 
     if skipped_dirs:
         print(f'Skipped subdirector(ies) {skipped_dirs} (e.g. registered-movie frames) -- not needed for '
               f'track2p\'s matching, not copied.')
 
-    if n_dropped > 0 and copied_per_roi:
-        print(f'\nWARNING: {n_dropped} ROI(s) were dropped from stat.npy/iscell.npy, but {copied_per_roi} '
-              f'were copied UNCHANGED and are still indexed by the ORIGINAL ROI order -- they are no longer '
-              f'index-aligned with the corrected stat.npy/iscell.npy. Track2p\'s own matching does not use '
-              f'these files, so this is fine for that purpose; re-align them by hand first if you need them '
-              f'for downstream fluorescence-trace analysis on this session.')
+    if filtered_per_roi:
+        print(f'Filtered to match dropped ROIs (kept {keep_mask.sum()} of {len(keep_mask)} row(s)): '
+              f'{filtered_per_roi}')
+
+    if n_dropped > 0 and skipped_per_roi_mismatch:
+        print(f'\nWARNING: {n_dropped} ROI(s) were dropped from stat.npy/iscell.npy, but {skipped_per_roi_mismatch} '
+              f'could not be filtered (unexpected row count) and were copied UNCHANGED -- they are no longer '
+              f'index-aligned with the corrected stat.npy/iscell.npy.')
 
     print(f'\nWrote corrected session to {os.path.abspath(args.out)}')
     print('Point ALL_DS_PATH at this folder in place of the original for your next run_gap_tolerant.py run.')
+    print(f'Elapsed time: {time.time() - t_start:.1f}s')
 
 
 if __name__ == '__main__':
