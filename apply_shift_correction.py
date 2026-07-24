@@ -308,7 +308,12 @@ def main():
     for fname in os.listdir(plane_dir):
         if fname in ('ops.npy', 'stat.npy', 'iscell.npy'):
             continue
-        shutil.copy2(os.path.join(plane_dir, fname), os.path.join(out_plane_dir, fname))
+        # copyfile(), not copy2() -- copy2() also tries to replicate metadata
+        # (mtime, macOS chflags, ...) via copystat(), which can raise
+        # PermissionError when the source and destination are on different
+        # volume types (e.g. a network-mounted source, local disk dest) --
+        # confirmed on real data. File CONTENT is all that's needed here.
+        shutil.copyfile(os.path.join(plane_dir, fname), os.path.join(out_plane_dir, fname))
         if fname in per_roi_files:
             copied_per_roi.append(fname)
 
