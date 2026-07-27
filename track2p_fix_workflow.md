@@ -4,6 +4,8 @@ Reusable procedure for diagnosing and recovering yield on a track2p run, built f
 
 All scripts are session-count-agnostic; just point them at new `save_path` directories.
 
+This doc covers everything through a clean, gap-tolerant-chained track2p `save_path` -- for what happens next (building a response tensor and running the actual drift analysis), see `drift_analysis_workflow.md` in the `Drift` repo. The two session logs were split starting 2026-07-24; this repo's covers track2p/registration work only from that date forward.
+
 ## Setup (once per rig/protocol)
 
 Generate a central settings file so you never have to hand-type track2p settings or borrow a whole `track_ops.npy` again:
@@ -13,6 +15,8 @@ python track_ops_config.py --export "/path/to/some/existing/track2p/track_ops.np
 ```
 
 Edit `track2p_settings.cfg` by hand if a setting ever needs to change. Every launcher script below prefers `TRACK_OPS_CFG` pointed at this file; `SETTINGS_SOURCE_PATH` (borrowing straight from an existing `track_ops.npy`) still works as a legacy fallback.
+
+`save_in_s2p_format` should be `False` (current default in `track2p_settings.cfg`) -- confirmed nothing in this repo's tooling or in track2p's own pipeline depends on the `matched_suite2p/` output it produces, so leaving it off saves real disk space on every run. Only turn it on if you specifically need that per-session copied-out suite2p folder for something outside this workflow.
 
 ## Pre-acquisition check (optional, prevents the problem instead of cleaning up after it)
 
@@ -127,7 +131,9 @@ Use your last `MAX_GAP=1` run on the cleaned session list (step 4's final output
 python fix3_partial_tracks.py <gap-tolerant save_path>
 ```
 
-This is the number that actually matters for downstream use — the K-based recovery curve, plus exported `plane{j}_match_mat_partial_K{K}.npy`/`.csv` files ready to use directly. Pick a K based on how much per-cell missingness your downstream analysis can tolerate.
+This is the number that actually matters for downstream use — the K-based recovery curve. Good for a fast, Python-only first look at how yield trades off against K before committing to anything heavier.
+
+If the destination is the Drift repo's `RunDriftAnalysis` pipeline specifically: you do NOT need this script's exported `plane{j}_match_mat_partial_K{K}.npy`/`.csv` files, and you do NOT need to re-run track2p or this script once per K you want to compare. `BuildResponseTensor.m` (Drift repo) now builds a single response tensor containing every candidate cell with real per-session presence/absence, and `CompareDriftAcrossK.m` sweeps K against that ONE tensor after the fact — see `drift_analysis_workflow.md`. This script's per-K export is still there and still works if you need a filtered `match_mat.npy` for something outside the Drift pipeline.
 
 ## 8. (Optional) Gauge whether fix #2 is worth building
 

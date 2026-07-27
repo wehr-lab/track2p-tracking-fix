@@ -433,6 +433,181 @@ def get_all_pl_match_mat_gap(all_ds_all_roi_ref, all_ds_all_roi_mov, all_ds_assi
     return all_pl_match_mat, gap_assign_cache
 
 
+def _claimed_from_match_mat(pl_match_mat, n_sessions):
+    """claimed[s] = set of LOCAL suite2p ROI indices at session s that are
+    already part of SOME existing row of pl_match_mat, in ANY column (not
+    just column s itself -- a session-0-anchored chain that merely passes
+    THROUGH session s at some point still claims that ROI there). Used by
+    add_anchor_agnostic_chains() to avoid ever seeding a duplicate row for
+    a cell that's already represented."""
+    claimed = [set() for _ in range(n_sessions)]
+    for row in pl_match_mat:
+        for s in range(n_sessions):
+            val = row[s]
+            if val is not None:
+                claimed[s].add(int(val))
+    return claimed
+
+
+def _build_forward_chain(anchor, anchor_local_idx, get_assign, n_sessions, max_gap):
+    """Forward-only gap-tolerant chain starting at (anchor, anchor_local_idx)
+    -- identical search logic to get_all_pl_match_mat_gap's session-0 rows
+    (try gap=1..max_gap at each step, stop the first time nothing matches),
+    just generalized to start anywhere. get_assign(i, k) must already be
+    closed over plane_j by the caller. Returns a plain dict {session:
+    local_idx}, always containing at least {anchor: anchor_local_idx}."""
+    chain = {anchor: anchor_local_idx}
+    track_roi = np.array(anchor_local_idx)
+    ds_ind = anchor
+    while ds_ind < n_sessions - 1:
+        found = False
+        for gap in range(1, max_gap + 1):
+            target = ds_ind + gap
+            if target > n_sessions - 1:
+                break
+            ref_ind, reg_ind = get_assign(ds_ind, target)
+            if ref_ind.size == 0:
+                continue
+            reg_ind_ind = np.where(ref_ind == track_roi.item())[0]
+            if reg_ind_ind.size > 0:
+                track_roi = reg_ind[reg_ind_ind]
+                chain[target] = int(track_roi.item())
+                ds_ind = target
+                found = True
+                break
+        if not found:
+            break
+    return chain
+
+
+def add_anchor_agnostic_chains(all_pl_match_mat, all_ds_all_roi_ref, all_ds_all_roi_mov,
+                                all_ds_assign_thr, track_ops, max_gap=3, gap_assign_cache=None,
+                                checkpoint_path=None, min_chain_length=2, verbose=True):
+    """Fix #2: anchor-agnostic seeding. Adds NEW rows to all_pl_match_mat
+    for cells that were never a session-0 candidate at all -- a cell first
+    genuinely detectable starting at session 3 has no session-0 ROI to be
+    seeded from, so fix #1's chaining (which only ever starts at session 0,
+    via init_all_pl_match_mat) can never represent it, no matter how good
+    its 3->4->5->... registrations are. estimate_fix2_ceiling.py's
+    per-session "orphan" counts are exactly the population this recovers.
+
+    FORWARD-ONLY, NO BACKWARD VERIFICATION (deliberate scope decision, not
+    an oversight): a chain seeded at anchor a is never checked for a
+    possible earlier match at sessions < a. One accepted consequence: a
+    session-0-anchored (or earlier-anchor) chain that stalls at some
+    session s can leave the SAME physical cell eligible to be picked up
+    again as a brand-new row from a later anchor, if it happens to
+    reappear there -- fragmenting one physical cell into two rows instead
+    of one continuous (but gapped) track. This is the price of not doing
+    full bidirectional identity resolution, which is a substantially
+    bigger project (does a backward match get merged into an existing
+    chain? re-anchored? deferred as "someday maybe").
+
+    DEDUPLICATION: processes anchor sessions in temporal order, 1 .. 
+    n_sessions-2 (the last session can never anchor a >=2-session chain --
+    nothing left to extend into). Before starting, and after every
+    successful new chain, _claimed_from_match_mat() is used to track which
+    (session, local ROI index) pairs are already spoken for -- by fix #1's
+    session-0-anchored rows, or by an already-processed earlier anchor
+    within this same pass -- so no candidate is ever seeded twice.
+
+    MIN CHAIN LENGTH: a newly-seeded chain that never extends past its own
+    anchor (never reaches a 2nd session) is discarded, not written --
+    DecomposeDrift needs an adjacent PAIR to compute anything, so a
+    single-session row contributes zero drift comparisons and would just
+    be bulk. (Failed/discarded candidates are NOT marked claimed --
+    genuinely fine, and arguably a feature: the same physical cell can get
+    an independent second attempt from the NEXT anchor, e.g. if THIS
+    anchor's own next-session registration happened to be the noisy one.)
+
+    COST: reuses the SAME gap_assign_cache fix #1's precompute/lazy
+    chaining already populated. precompute_gap_pairs_parallel() already
+    computes (i, i+gap) for EVERY i in range(n_sessions-1), not just i=0,
+    so if precompute already ran with this max_gap, every pair this
+    function could need is already cached -- this whole pass costs zero
+    additional elastix calls, just re-analysis of already-computed data.
+    Only genuinely new pairs (e.g. if only fix #1's lazy path ran, which
+    only computes what session-0 chains actually needed) trigger a fresh
+    registration, same cache-and-persist behavior as get_all_pl_match_mat_gap.
+
+    Returns (all_pl_match_mat, gap_assign_cache) -- all_pl_match_mat's list
+    identity is preserved (each plane's array is replaced in place via
+    np.vstack, not the list itself), gap_assign_cache reflects any newly
+    computed pairs.
+    """
+    n_sessions = len(track_ops.all_ds_path)
+    n_pairs = n_sessions - 1
+
+    if checkpoint_path is None:
+        checkpoint_path = _checkpoint_path(track_ops)
+    if gap_assign_cache is None:
+        gap_assign_cache = _load_checkpoint(checkpoint_path)
+
+    for plane_j in range(track_ops.nplanes):
+
+        pl_match_mat = all_pl_match_mat[plane_j]
+
+        def get_assign(i, k, plane_j=plane_j):
+            if k == i + 1:
+                return all_ds_assign_thr[i][plane_j]
+            key = (i, k, plane_j)
+            if key not in gap_assign_cache:
+                roi_ref_raw = _raw_roi_array(all_ds_all_roi_ref, all_ds_all_roi_mov, i, plane_j, n_pairs)
+                roi_mov_raw = _raw_roi_array(all_ds_all_roi_ref, all_ds_all_roi_mov, k, plane_j, n_pairs)
+                ref_img = track_ops.all_ds_avg_ch1[i][plane_j]
+                mov_img = track_ops.all_ds_avg_ch1[k][plane_j]
+                ref_ind, reg_ind = _assign_pair(roi_ref_raw, roi_mov_raw, ref_img, mov_img, track_ops)
+                gap_assign_cache[key] = [ref_ind, reg_ind]
+                _save_checkpoint(checkpoint_path, gap_assign_cache)
+                if verbose:
+                    print(f'  [fix2] registered session {i} -> session {k} directly (plane {plane_j}): '
+                          f'{len(ref_ind)} matches above threshold')
+            return gap_assign_cache[key]
+
+        claimed = _claimed_from_match_mat(pl_match_mat, n_sessions)
+
+        new_rows = []
+        n_tried = 0
+        n_kept = 0
+
+        for anchor in range(1, n_sessions - 1):
+
+            n_anchor_candidates = _raw_roi_array(
+                all_ds_all_roi_ref, all_ds_all_roi_mov, anchor, plane_j, n_pairs).shape[2]
+
+            for local_idx in range(n_anchor_candidates):
+
+                if local_idx in claimed[anchor]:
+                    continue
+
+                n_tried += 1
+
+                chain = _build_forward_chain(anchor, local_idx, get_assign, n_sessions, max_gap)
+
+                if len(chain) < min_chain_length:
+                    continue  # single-session, not worth writing -- and NOT claimed, see docstring
+
+                n_kept += 1
+
+                for s, idx in chain.items():
+                    claimed[s].add(idx)
+
+                row = np.full(n_sessions, None, dtype=object)
+                for s, idx in chain.items():
+                    row[s] = idx
+                new_rows.append(row)
+
+        if verbose:
+            print(f'[fix2 anchor-agnostic] plane{plane_j}: tried {n_tried} unclaimed candidate(s) '
+                  f'from anchors 1..{n_sessions - 2}, {n_kept} produced a chain of >= {min_chain_length} '
+                  f'session(s) and were added ({n_tried - n_kept} discarded as single-session-only).')
+
+        if new_rows:
+            all_pl_match_mat[plane_j] = np.vstack([pl_match_mat, np.array(new_rows, dtype=object)])
+
+    return all_pl_match_mat, gap_assign_cache
+
+
 def run_t2p_gap_tolerant(track_ops, max_gap=3, n_workers=1):
     """Drop-in alternative to track2p.t2p.run_t2p using gap-tolerant chaining.
 
