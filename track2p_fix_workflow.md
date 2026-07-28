@@ -135,13 +135,32 @@ This is the number that actually matters for downstream use — the K-based reco
 
 If the destination is the Drift repo's `RunDriftAnalysis` pipeline specifically: you do NOT need this script's exported `plane{j}_match_mat_partial_K{K}.npy`/`.csv` files, and you do NOT need to re-run track2p or this script once per K you want to compare. `BuildResponseTensor.m` (Drift repo) now builds a single response tensor containing every candidate cell with real per-session presence/absence, and `CompareDriftAcrossK.m` sweeps K against that ONE tensor after the fact — see `drift_analysis_workflow.md`. This script's per-K export is still there and still works if you need a filtered `match_mat.npy` for something outside the Drift pipeline.
 
-## 8. (Optional) Gauge whether fix #2 is worth building
+## 8. (Optional) Gauge whether fix #2 is worth turning on
 
 ```
 python estimate_fix2_ceiling.py <gap-tolerant save_path>
 ```
 
 Read the "proj. survive to end" column relative to how many transitions remain from each anchor session — a high value from a late-anchored session mostly reflects short 2-3 session snippets, not long-range value. Worth tracking this across the 9/13/18-session checkpoints to see whether the case for fix #2 strengthens as session count grows.
+
+## 9. (Optional) Recover cells session 0 never saw — fix #2 (anchor-agnostic seeding)
+
+Fix #1 (step 5) only ever seeds candidate chains from session 0 — a cell first genuinely detectable partway through the session list (e.g. it only turns on, or only enters the imaging plane, starting at session 4) is invisible to it no matter how good every later registration is. Fix #2 recovers those cells by seeding brand-new forward-only chains from every OTHER session too.
+
+To turn it on, set in `run_gap_tolerant_settings.py` before running step 5:
+
+```python
+ANCHOR_AGNOSTIC_SEEDING = True
+MIN_CHAIN_LENGTH = 2   # discard newly-seeded chains that never reach a 2nd session
+```
+
+Then run `run_gap_tolerant.py` as normal (step 5) — it now prints a `[fix2]` block after the usual `[gap-tolerant, max_gap=...]` summary, with a per-plane `tried N, kept M` count. Off by default, and purely additive: every session-0-anchored row from fix #1 is left untouched, only new rows are appended, so it's safe to flip on for a rerun of an already-validated session list.
+
+Design notes worth knowing before trusting the output:
+- **Forward-only.** A newly-seeded chain is never checked for a possible earlier match at sessions before its anchor. Backward verification (does a match reappearing later belong to an existing stalled chain instead of being a new row?) is deliberately deferred — see `fix1_gap_tolerant_chain.py`'s `add_anchor_agnostic_chains()` docstring for the tradeoff this accepts (occasional fragmentation of one physical cell into two rows, instead of full bidirectional identity resolution).
+- **Dedup is greedy and order-dependent.** Anchors are processed in temporal order (fix #1's session-0 rows first, then anchor 1, 2, 3, ...), claiming `(session, local_idx)` pairs as they're used so nothing is double-counted — but a cell that could have chained further if seeded from a *different* anchor won't get a second chance once claimed.
+- **Near-zero extra registration cost if `N_WORKERS > 1`.** `precompute_gap_pairs_parallel()` already computes every `(i, i+gap)` pair for every starting session `i`, not just `i=0`, so this pass mostly reuses the same warm `gap_assign_cache` fix #1 already built.
+- Validated against synthetic mocks only (forward chaining, dedup/claimed-index skipping, `MIN_CHAIN_LENGTH` filtering) — not yet run on real data as of 2026-07-27.
 
 ## Known structural facts worth remembering mid-analysis
 

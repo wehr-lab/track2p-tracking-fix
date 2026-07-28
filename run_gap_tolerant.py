@@ -32,6 +32,16 @@ in fix1_gap_tolerant_chain.py for the trade-off and two real gotchas before
 raising it. This script's logic below is wrapped in
 `if __name__ == '__main__':` specifically so that's safe to use.
 
+TIP -- ANCHOR_AGNOSTIC_SEEDING (in the settings file, off by default) turns on
+fix #2: after the normal session-0-anchored chaining, also seed brand-new
+forward-only chains from every OTHER session, recovering cells that were
+never a session-0 candidate at all (e.g. first genuinely detectable partway
+through the session list). See add_anchor_agnostic_chains()'s docstring in
+fix1_gap_tolerant_chain.py for the full design (why forward-only, how dedup
+works, why single-session stubs are discarded via MIN_CHAIN_LENGTH). Additive
+and off by default -- safe to turn on for a rerun without disturbing any
+session-0-anchored rows already validated from a prior run.
+
 Usage:
 
     python run_gap_tolerant.py
@@ -70,6 +80,7 @@ from session_order_utils import ensure_chronological_order
 from track_ops_config import load_track_ops
 from run_gap_tolerant_settings import (
     TRACK_OPS_CFG, SETTINGS_SOURCE_PATH, ALL_DS_PATH, NEW_BASE_PATH, MAX_GAP, N_WORKERS,
+    ANCHOR_AGNOSTIC_SEEDING, MIN_CHAIN_LENGTH,
 )
 
 
@@ -96,7 +107,9 @@ def main():
 
     track_ops.save_path = NEW_BASE_PATH   # override so this run doesn't collide with the old one
 
-    run_t2p_gap_tolerant(track_ops, max_gap=MAX_GAP, n_workers=N_WORKERS)
+    run_t2p_gap_tolerant(track_ops, max_gap=MAX_GAP, n_workers=N_WORKERS,
+                          anchor_agnostic_seeding=ANCHOR_AGNOSTIC_SEEDING,
+                          min_chain_length=MIN_CHAIN_LENGTH)
 
     # Total wall time for THIS script, start to finish -- includes steps
     # run_t2p_gap_tolerant() doesn't itself time (session loading, the

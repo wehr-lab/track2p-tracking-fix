@@ -608,7 +608,7 @@ def add_anchor_agnostic_chains(all_pl_match_mat, all_ds_all_roi_ref, all_ds_all_
     return all_pl_match_mat, gap_assign_cache
 
 
-def run_t2p_gap_tolerant(track_ops, max_gap=3, n_workers=1):
+def run_t2p_gap_tolerant(track_ops, max_gap=3, n_workers=1, anchor_agnostic_seeding=False, min_chain_length=2):
     """Drop-in alternative to track2p.t2p.run_t2p using gap-tolerant chaining.
 
     Steps 1-6 (load data, register consecutive pairs, plots) are the
@@ -633,6 +633,20 @@ def run_t2p_gap_tolerant(track_ops, max_gap=3, n_workers=1):
     then just cache lookups + assignment logic, no elastix calls) -- so a
     N_WORKERS=1 vs. N_WORKERS>1 run on the same session list gives you a
     real speedup number instead of having to watch the clock yourself.
+
+    anchor_agnostic_seeding: opt-in, off by default. When True, runs fix #2
+    (add_anchor_agnostic_chains) after fix #1's session-0-anchored chaining
+    -- recovers cells that were never a session-0 candidate at all by
+    seeding new forward-only chains from every OTHER session in turn. See
+    add_anchor_agnostic_chains()'s own docstring for the full design
+    (dedup, min_chain_length, why it's forward-only). Off by default
+    because it's new and additive: existing session-0-anchored rows are
+    never touched, so this can be safely turned on for a rerun without
+    disturbing anything already validated.
+    min_chain_length: only used when anchor_agnostic_seeding=True -- a
+    newly-seeded chain that never reaches this many sessions is discarded,
+    not written (default 2 -- a single-session row contributes nothing to
+    DecomposeDrift, which needs an adjacent pair).
     """
     from track2p.t2p import generate_suite2p_indices, save_in_s2p_format
 
@@ -704,6 +718,17 @@ def run_t2p_gap_tolerant(track_ops, max_gap=3, n_workers=1):
           f'({"warm cache from precompute above" if precompute_elapsed is not None else "lazy, sequential gap registration as needed"})'
           + (f' -- {timing_ckpt["chain_elapsed"]:.1f}s cumulative on this save_path'
              if resumed_from_prior_attempt else ''))
+
+    # *** fix #2 (opt-in): anchor-agnostic seeding for cells session 0 never saw ***
+    if anchor_agnostic_seeding:
+        print(f'\n[fix2] anchor-agnostic seeding enabled (min_chain_length={min_chain_length}) -- '
+              f'looking for cells never matched back to session 0...')
+        fix2_start = time.monotonic()
+        all_pl_match_mat, gap_assign_cache = add_anchor_agnostic_chains(
+            all_pl_match_mat, all_ds_all_roi_ref, all_ds_all_roi_mov, all_ds_assign_thr, track_ops,
+            max_gap=max_gap, gap_assign_cache=gap_assign_cache, min_chain_length=min_chain_length)
+        fix2_elapsed = time.monotonic() - fix2_start
+        print(f'[fix2] anchor-agnostic seeding finished in {fix2_elapsed:.1f}s this attempt')
 
     save_track_ops(track_ops)
     save_match_diagnostics(all_ds_thr_met, all_ds_thr, track_ops)

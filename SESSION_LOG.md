@@ -4,6 +4,44 @@ Running log of work sessions on the track2p tracking-fix project. Newest entries
 
 ---
 
+## 2026-07-27
+
+### Designed and implemented fix #2 (anchor-agnostic seeding) in `fix1_gap_tolerant_chain.py`
+
+- **The gap it closes**: fix #1's gap-tolerant chaining (2026-07-xx) only ever seeds candidate chains from session 0 (`init_all_pl_match_mat` populates column 0 only for session-0 ROIs; the main chaining loop in `get_all_pl_match_mat_gap` explicitly skips any row where column 0 is `None`). A cell first genuinely detectable partway through the session list -- never present, or never registerable, at session 0 -- is invisible to fix #1 no matter how good every later transition is. `estimate_fix2_ceiling.py`'s per-session "orphan" counts (built earlier) are exactly this population.
+- **Scope, confirmed with the user before starting**: forward-only (no backward verification -- explicitly deferred as "someday maybe," not an oversight); discard any newly-seeded chain that never reaches a 2nd session ("not worth writing"); skipped an earlier-considered smaller "just extend session-0 seeding" quick win in favor of going straight to the full anchor-agnostic design.
+- **New functions** (`fix1_gap_tolerant_chain.py`): `_claimed_from_match_mat()` (builds a `[session] -> set(local ROI idx)` map of everything already spoken for by existing rows), `_build_forward_chain()` (the same gap=1..max_gap forward search fix #1 already used for session-0 rows, generalized to start from any session), `add_anchor_agnostic_chains()` (the orchestrator: walks anchor sessions 1..n-2 in temporal order, tries every unclaimed candidate ROI at each, keeps chains of length >= `min_chain_length` (default 2), appends them as new rows via `np.vstack`).
+- **Dedup**: greedy, order-dependent -- anchors processed in temporal order, session-0-anchored rows (fix #1's output) always claimed first, so a cell reachable from more than one anchor is only ever written once, from whichever anchor is earliest.
+- **Cost**: reuses the exact same `gap_assign_cache`/checkpoint infrastructure fix #1 already built. Confirmed via source read that `precompute_gap_pairs_parallel()` already computes `(i, i+gap)` for every starting session `i`, not just `i=0` -- so if a run already used `N_WORKERS > 1`, this pass is close to free (cache lookups only, no new elastix calls). No changes needed anywhere downstream: `save_all_pl_match_mat`/`generate_suite2p_indices`/`export_match_mat_for_matlab.py` all already handle arbitrary `None` patterns generically with no column-0 assumption, and `save_in_s2p_format`'s strict-AND filter naturally (and correctly) excludes every anchor-agnostic row, since by construction they're always missing at least column 0.
+- **Wired in** as opt-in: `run_t2p_gap_tolerant()` gained `anchor_agnostic_seeding=False, min_chain_length=2` parameters, called right after fix #1's chaining step, before `save_track_ops`. `run_gap_tolerant_settings.py` gained `ANCHOR_AGNOSTIC_SEEDING = False` / `MIN_CHAIN_LENGTH = 2`; `run_gap_tolerant.py` passes them through and got a new TIP paragraph explaining the feature. Off by default and purely additive (existing session-0-anchored rows are never modified), so safe to flip on for a rerun of an already-validated session list without risk.
+- **Validation**: no MATLAB/real track2p available to Claude, so validated the three new functions standalone against synthetic mocks covering (1) a normal forward chain from a non-zero anchor gets added correctly, (2) a candidate whose local index is already claimed by an existing row is correctly skipped and never re-seeded as a duplicate, (3) chains that never reach a 2nd session are correctly discarded and don't pollute the output. All three passed. Also re-verified full-file syntax (`ast.parse`) after every edit. Not yet run on real data.
+- Documented usage as a new step 9 in `track2p_fix_workflow.md` (right after the existing step 8, `estimate_fix2_ceiling.py`, which now reads as "should I turn this on" rather than "should I ever build this").
+
+### Validated fix #2 on real data: clean A/B on wehr5917 `gap3sc` (8 sessions)
+
+- First attempt at validating produced a false alarm: comparing a fresh `ANCHOR_AGNOSTIC_SEEDING=True` run's `partial_track_summary.json` against an OLD cached upload (1181 candidates / 9 sessions, from a stale pre-shift-correction run) made it look like session count and candidate pool had both mysteriously shrunk. Root cause was just a stale file attachment, not a real discrepancy -- resolved by having the user paste the JSON text directly and, more importantly, by rerunning BOTH flag settings back-to-back on the exact same 8-session `gap3sc` list for a true apples-to-apples comparison.
+- **Direct instrumented measurement, from the run's own console output** (before comparing any files at all): fix #1 alone seeds 428 rows (= "Chose 428/11008 ROIs" for session 0, the anchor). The `[fix2 anchor-agnostic]` block reported: 653 unclaimed candidates tried across anchors 1-6, 434 kept (chain length >= 2), 219 discarded as single-session-only. `428 + 434 = 862` matched `fix3_partial_tracks.py`'s total row count exactly -- confirms the accounting is internally consistent before even looking at the K-table.
+- **Clean K-by-K A/B** (`ANCHOR_AGNOSTIC_SEEDING=False` vs. `True`, same 8-session list, same everything else):
+
+  | K | fix #1 only | fix #1 + fix #2 | fix #2's contribution |
+  |---|---|---|---|
+  | 8 (strict-AND) | 58 | 58 | +0 |
+  | 7 | 98 | 102 | +4 (4%) |
+  | 6 (recommended) | 125 | 160 | +35 (28%) |
+  | 5 | 138 | 225 | +87 (63%) |
+  | 4 | 184 | 354 | +170 (92%) |
+  | total rows | 428 | 862 | +434 |
+
+- Confirms the predicted structural fact exactly: **zero effect at strict-AND (K=8)**, mathematically guaranteed since every fix #2 row is missing at least session 0 by construction, so it can never contribute to the all-sessions-present count. The contribution grows fast as K loosens -- fix #2 nearly doubles yield at K=4 -- consistent with anchor-agnostic chains (which start later in the list) having less runway to reach high K but still being real, trackable cells at looser thresholds.
+- At the pipeline's own `recommended_k=6` (same in both runs), fix #2 is responsible for 35 of the 160 cells (22% of that dataset) -- a real, not marginal, gain on this dataset.
+
+## Where to pick up tomorrow (added to)
+
+- ~~Try `ANCHOR_AGNOSTIC_SEEDING = True` on a real dataset...~~ Done -- see "Validated fix #2 on real data" above. Actual yield (434 cells recovered, 862 total rows) came in well below `estimate_fix2_ceiling.py`'s earlier ~510-cell projection for the recovered count specifically -- worth a quick look at why if it matters (ceiling script's assumptions vs. `min_chain_length=2`'s filtering, most likely) but not blocking, since the K-table result is real and usable as-is.
+- Everything else from 2026-07-24's "Where to pick up tomorrow" list below is still open (re-run MAX_GAP=1 for attribution if needed; `06-09-26`/`06-02-26` exclusion question; wehr5913 rig crash).
+
+---
+
 ## 2026-07-24
 
 ### Closed out the wehr5917 shift-correction production run
