@@ -28,6 +28,17 @@ session_order_utils.py) -- the track2p GUI does not sort sessions by date,
 so a list built by adding sessions to the GUI in more than one batch can
 silently end up out of order, which corrupts registration since track2p
 only ever compares list-adjacent sessions.
+
+EXCLUSION LOG: every run appends one line to 'exclusion_log.jsonl', written
+next to the run folders themselves (i.e. in the parent directory of
+NEW_BASE_PATH -- so if NEW_BASE_PATH is '.../wehr5149/gap1_x6', the log
+lands at '.../wehr5149/exclusion_log.jsonl' and accumulates across every
+gap1_xN round for that subject). This is the persistent breadcrumb trail
+that used to only exist as ephemeral stdout output plus manually-maintained
+commented-out EXCLUDE_MATCH lines in the settings file -- neither of which
+survives reliably across many rounds. Each entry records: timestamp,
+NEW_BASE_PATH, which session got excluded, the full remaining session list,
+and the resulting per-plane strict-AND yield.
 """
 
 import sys
@@ -35,6 +46,8 @@ from machine_config import GIT_CLONE_PATH   # per-machine path -- see machine_co
 sys.path.insert(0, GIT_CLONE_PATH)
 
 import os
+import json
+from datetime import datetime
 import numpy as np
 from track2p.ops.default import DefaultTrackOps
 from track2p.t2p import run_t2p
@@ -43,6 +56,38 @@ from track_ops_config import load_track_ops
 from run_exclude_session_settings import (
     TRACK_OPS_CFG, SETTINGS_SOURCE_PATH, ALL_DS_PATH, NEW_BASE_PATH, EXCLUDE_MATCH,
 )
+
+
+def append_exclusion_log(new_base_path, excluded_path, remaining_paths, yield_by_plane):
+    """
+    Append one JSON-lines entry recording this run to exclusion_log.jsonl,
+    written in the PARENT directory of new_base_path so it accumulates
+    across every gap1_xN round for a given subject instead of being scoped
+    to (and lost with) any single round's own output folder.
+    """
+    log_dir = os.path.dirname(os.path.normpath(new_base_path))
+    log_path = os.path.join(log_dir, 'exclusion_log.jsonl')
+
+    entry = {
+        'timestamp': datetime.now().isoformat(timespec='seconds'),
+        'new_base_path': new_base_path,
+        'excluded_session': os.path.basename(os.path.normpath(excluded_path)),
+        'excluded_path': excluded_path,
+        'n_remaining_sessions': len(remaining_paths),
+        'remaining_sessions': [os.path.basename(os.path.normpath(p)) for p in remaining_paths],
+        'yield_by_plane': yield_by_plane,
+    }
+
+    with open(log_path, 'a') as f:
+        f.write(json.dumps(entry) + '\n')
+
+    print(f'\n[exclusion log] appended entry to {log_path}')
+    print(f'[exclusion log] cumulative history for this subject:')
+    with open(log_path) as f:
+        for i, line in enumerate(f):
+            e = json.loads(line)
+            print(f"  {i}: {e['timestamp']}  excluded={e['excluded_session']}  "
+                  f"-> {e['n_remaining_sessions']} sessions remaining, yield_by_plane={e['yield_by_plane']}")
 
 
 def main():
@@ -87,11 +132,15 @@ def main():
 
     # --- report strict-AND yield ---
     final_save_path = os.path.join(NEW_BASE_PATH, 'track2p')  # run_t2p's init_save_paths() appends this
+    yield_by_plane = {}
     for j in range(track_ops.nplanes):
         mm = np.load(os.path.join(final_save_path, f'plane{j}_match_mat.npy'), allow_pickle=True)
         n_tracked = int(np.sum(np.all(mm != None, axis=1)))  # noqa: E711
+        yield_by_plane[j] = n_tracked
         print(f'\nPlane {j}: {n_tracked} cells tracked across all {mm.shape[1]} remaining sessions '
               f'(out of {mm.shape[0]} candidate ROIs from session 0)')
+
+    append_exclusion_log(NEW_BASE_PATH, excluded_path, track_ops.all_ds_path, yield_by_plane)
 
 
 if __name__ == '__main__':
