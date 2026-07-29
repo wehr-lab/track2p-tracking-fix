@@ -50,7 +50,7 @@ forces the git clone to win regardless of cwd.
 """
 
 import sys
-GIT_CLONE_PATH = '/Users/wehr/git/track2p'   # confirm with: python -c "import track2p; print(track2p.__file__)"
+from machine_config import GIT_CLONE_PATH   # per-machine path -- see machine_config.py / local_machine.cfg
 sys.path.insert(0, GIT_CLONE_PATH)
 
 import os

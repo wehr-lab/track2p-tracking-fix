@@ -1,0 +1,14 @@
+# local_machine.cfg
+#
+# Per-machine settings, gitignored -- each machine (Mac, talapas cluster,
+# any future one) keeps its own copy of this file with its own path below.
+# Copy this example to `local_machine.cfg` (untracked) and edit the path
+# for THIS machine. See machine_config.py for how it's used/validated.
+
+[paths]
+# Root of your patched track2p git clone (the directory you ran
+# `git clone` into -- it should contain a track2p/ subfolder, the actual
+# importable package). Confirm with, after activating your track2p conda
+# env:
+#     python -c "import track2p; print(track2p.__file__)"
+git_clone_path = /path/to/your/track2p/clone
