@@ -147,21 +147,93 @@ def _checkpoint_path(track_ops):
     return os.path.join(track_ops.save_path, 'gap_cache_checkpoint.npy')
 
 
-def _load_checkpoint(checkpoint_path):
+def _load_checkpoint(checkpoint_path, track_ops=None):
+    """BUG FOUND 2026-07-29 (see SESSION_LOG.md / Drift repo's ghost-row
+    investigation): this checkpoint used to be keyed ONLY by
+    track_ops.save_path (see _checkpoint_path) -- the cache dict itself is
+    keyed by (i, k, plane_j) SESSION INDEX pairs, with no record of which
+    ACTUAL session list those indices refer to. If the same save_path is
+    ever reused across a run with a DIFFERENT session list (a session
+    excluded, reordered, or added -- e.g. the same output folder used for
+    a 'gap3' attempt and then a later 'skip5_gap6' attempt), every session
+    after the change point shifts index, and a stale cache entry like
+    (3, 7, 0) silently gets reused as if it still meant the SAME pair of
+    actual session directories -- applying one pair's registration result
+    to a completely different pair, with no error or warning. This is the
+    leading suspect for the 51.8%-ghost-row finding on wehr5336's
+    '1-18gap3-skip5_gap6' run (scattered, not a contiguous fix#2 append --
+    see diagnose_ghost_rows.py's conclusion for that run).
+
+    Now stores {'session_paths': track_ops.all_ds_path, 'cache': cache}
+    instead of the raw cache dict, and refuses to reuse it if
+    track_ops.all_ds_path (the CURRENT run's session list, in order)
+    doesn't match exactly -- printing a loud warning and starting fresh
+    instead of silently mis-applying stale, index-shifted results.
+    Old-format checkpoints (written before this fix, a raw {(i,k,plane_j):
+    [...]} dict with no fingerprint) are still loaded for backward
+    compatibility, but with a warning that their correctness against the
+    CURRENT session list can't be verified -- delete them and rerun from
+    scratch if this save_path has EVER been reused across a session-list
+    change since they were written.
+    """
     if not os.path.exists(checkpoint_path):
         return {}
-    cache = np.load(checkpoint_path, allow_pickle=True).item()
+
+    loaded = np.load(checkpoint_path, allow_pickle=True).item()
+
+    if isinstance(loaded, dict) and set(loaded.keys()) == {'session_paths', 'cache'}:
+
+        cache = loaded['cache']
+        saved_paths = list(loaded['session_paths'])
+
+        if track_ops is not None:
+
+            current_paths = list(track_ops.all_ds_path)
+
+            if saved_paths != current_paths:
+
+                print(f'[gap checkpoint] WARNING: {checkpoint_path} was built for a '
+                      f'DIFFERENT session list ({len(saved_paths)} session(s)) than this '
+                      f'run ({len(current_paths)} session(s), or same count but different '
+                      f'paths/order). (i,k,plane_j) cache keys are session INDEX pairs, not '
+                      f'session identities -- reusing this cache across a changed session '
+                      f'list (excluding/reordering/adding a session) would silently apply '
+                      f'registration results computed for the WRONG session pair. IGNORING '
+                      f'this cache and starting fresh for safety.')
+
+                return {}
+
+    else:
+
+        cache = loaded
+
+        print(f'[gap checkpoint] {checkpoint_path} predates session-list fingerprinting -- '
+              f'loading it as-is, but its correctness against the CURRENT session list '
+              f'cannot be verified. If this save_path has EVER been reused across a '
+              f'session-list change (excluding/reordering/adding a session) since this '
+              f'cache was written, delete it and let this rerun from scratch to be safe.')
+
     print(f'[gap checkpoint] resuming from {checkpoint_path}: '
           f'{len(cache)} previously-computed gap registration(s) loaded, will not be redone.')
+
     return cache
 
 
-def _save_checkpoint(checkpoint_path, cache):
+def _save_checkpoint(checkpoint_path, cache, track_ops=None):
     # write-then-replace so a crash mid-write (this whole feature exists
     # because native crashes are abrupt) can't leave a truncated/corrupt
     # checkpoint file that then fails to load on the next attempt.
+    #
+    # Now saves the current session list alongside the cache (see
+    # _load_checkpoint's docstring) so a future load can detect and refuse
+    # a session-list mismatch instead of silently reusing index-shifted
+    # results.
     tmp_base = checkpoint_path[:-4] if checkpoint_path.endswith('.npy') else checkpoint_path
-    np.save(tmp_base + '.tmp', cache, allow_pickle=True)  # np.save appends '.npy' itself
+    if track_ops is not None:
+        payload = {'session_paths': list(track_ops.all_ds_path), 'cache': cache}
+    else:
+        payload = cache
+    np.save(tmp_base + '.tmp', payload, allow_pickle=True)  # np.save appends '.npy' itself
     os.replace(tmp_base + '.tmp.npy', checkpoint_path)
 
 
@@ -181,10 +253,35 @@ def _timing_checkpoint_path(track_ops):
     return os.path.join(track_ops.save_path, 'gap_timing_checkpoint.npy')
 
 
-def _load_timing_checkpoint(path):
+def _load_timing_checkpoint(path, track_ops=None):
+    """Same save_path-only-keying issue as gap_cache_checkpoint.npy (see
+    _load_checkpoint's docstring, fixed 2026-07-29) -- but this file only
+    ever feeds a console TIMING message (cumulative precompute/chain
+    compute time across attempts), never any actual match/cell data. A
+    stale hit here after a session-list change can only produce a
+    MISLEADING timing report (e.g. claiming time was 'already accumulated
+    on this save_path' when the session list has since changed) -- it
+    cannot corrupt match_mat. Fixed anyway, for the same reason and the
+    same fingerprinting approach, now that this file was found while
+    answering the more general 'what else is unsafe about reusing a
+    save_path' question.
+    """
     if not os.path.exists(path):
         return {'precompute_elapsed': 0.0, 'chain_elapsed': 0.0}
+
     d = np.load(path, allow_pickle=True).item()
+
+    if track_ops is not None and 'session_paths' in d:
+
+        if list(d['session_paths']) != list(track_ops.all_ds_path):
+
+            print(f'[timing checkpoint] {path} was built for a DIFFERENT session list -- '
+                  f'discarding its cumulative timing numbers (they would be misleading, not '
+                  f'wrong data, but no longer meaningful for this session list) and starting '
+                  f'the cumulative-time count fresh at 0.')
+
+            return {'precompute_elapsed': 0.0, 'chain_elapsed': 0.0}
+
     if d.get('precompute_elapsed', 0.0) > 0 or d.get('chain_elapsed', 0.0) > 0:
         print(f'[timing checkpoint] {path} shows {d.get("precompute_elapsed", 0.0):.1f}s precompute + '
               f'{d.get("chain_elapsed", 0.0):.1f}s chaining already accumulated on this save_path '
@@ -192,7 +289,10 @@ def _load_timing_checkpoint(path):
     return d
 
 
-def _save_timing_checkpoint(path, d):
+def _save_timing_checkpoint(path, d, track_ops=None):
+    if track_ops is not None:
+        d = dict(d)
+        d['session_paths'] = list(track_ops.all_ds_path)
     tmp_base = path[:-4] if path.endswith('.npy') else path
     np.save(tmp_base + '.tmp', d, allow_pickle=True)
     os.replace(tmp_base + '.tmp.npy', path)
@@ -271,7 +371,7 @@ def precompute_gap_pairs_parallel(all_ds_all_roi_ref, all_ds_all_roi_mov, track_
 
     if checkpoint_path is None:
         checkpoint_path = _checkpoint_path(track_ops)
-    gap_assign_cache = _load_checkpoint(checkpoint_path)
+    gap_assign_cache = _load_checkpoint(checkpoint_path, track_ops)
 
     # full bounded universe: gap=1 is always the free fast path (already
     # computed by the normal consecutive pass), never needs this.
@@ -338,9 +438,9 @@ def precompute_gap_pairs_parallel(all_ds_all_roi_ref, all_ds_all_roi_mov, track_
                 print(f'  [gap precompute {completed}/{len(todo)}] session {i} -> {k} '
                       f'(plane {plane_j}): {len(ref_ind)} matches above threshold{eta_str}')
             if completed % max(1, n_workers) == 0 or completed == len(todo):
-                _save_checkpoint(checkpoint_path, gap_assign_cache)  # periodic flush, not every result
+                _save_checkpoint(checkpoint_path, gap_assign_cache, track_ops)  # periodic flush, not every result
 
-    _save_checkpoint(checkpoint_path, gap_assign_cache)  # final flush, belt-and-suspenders
+    _save_checkpoint(checkpoint_path, gap_assign_cache, track_ops)  # final flush, belt-and-suspenders
     return gap_assign_cache
 
 
@@ -371,9 +471,32 @@ def get_all_pl_match_mat_gap(all_ds_all_roi_ref, all_ds_all_roi_mov, all_ds_assi
     n_pairs = n_sessions - 1
     all_pl_match_mat = init_all_pl_match_mat(all_ds_all_roi_ref, all_ds_assign_thr, track_ops)
 
+    # DIAGNOSTIC, added 2026-07-29 (see SESSION_LOG.md -- ghost-row
+    # investigation): report how many rows are ALREADY all-None
+    # immediately after init_all_pl_match_mat returns, BEFORE any of this
+    # repo's own gap-tolerant chaining touches the array. This is the
+    # decisive test for whether the 558/1078 ghost rows found on wehr5336
+    # come from the external track2p package's own init_all_pl_match_mat
+    # (would show up here already) or from something in THIS function's
+    # own chaining logic below wiping an initially-valid row (would NOT
+    # show up here, only after the loop finishes). Purely a print --
+    # does not change any behavior.
+    for _plane_j, _mm in enumerate(all_pl_match_mat):
+        _is_none = np.array([[v is None for v in row] for row in _mm])
+        _ghost = _is_none.all(axis=1)
+        if _ghost.sum() > 0:
+            _verdict = 'external track2p package (init_all_pl_match_mat) is the source'
+        else:
+            _verdict = ("rows start clean here -- any ghosts appearing later come from "
+                        "THIS function's own chaining logic below")
+        print(f'[ghost-row diagnostic] plane {_plane_j}: '
+              f'{int(_ghost.sum())}/{_mm.shape[0]} rows are ALREADY all-None '
+              f'immediately after init_all_pl_match_mat (before any gap-tolerant '
+              f'chaining) -- {_verdict}.')
+
     if checkpoint_path is None:
         checkpoint_path = _checkpoint_path(track_ops)
-    gap_assign_cache = _load_checkpoint(checkpoint_path)  # (i, k, plane_j) -> [ref_ind_thr, reg_ind_thr]
+    gap_assign_cache = _load_checkpoint(checkpoint_path, track_ops)  # (i, k, plane_j) -> [ref_ind_thr, reg_ind_thr]
 
     def get_assign(i, k, plane_j):
         if k == i + 1:
@@ -386,7 +509,7 @@ def get_all_pl_match_mat_gap(all_ds_all_roi_ref, all_ds_all_roi_mov, all_ds_assi
             mov_img = track_ops.all_ds_avg_ch1[k][plane_j]
             ref_ind, reg_ind = _assign_pair(roi_ref_raw, roi_mov_raw, ref_img, mov_img, track_ops)
             gap_assign_cache[key] = [ref_ind, reg_ind]
-            _save_checkpoint(checkpoint_path, gap_assign_cache)  # persist before moving on
+            _save_checkpoint(checkpoint_path, gap_assign_cache, track_ops)  # persist before moving on
             if verbose:
                 print(f'  [gap] registered session {i} -> session {k} directly (plane {plane_j}): '
                       f'{len(ref_ind)} matches above threshold')
@@ -541,7 +664,7 @@ def add_anchor_agnostic_chains(all_pl_match_mat, all_ds_all_roi_ref, all_ds_all_
     if checkpoint_path is None:
         checkpoint_path = _checkpoint_path(track_ops)
     if gap_assign_cache is None:
-        gap_assign_cache = _load_checkpoint(checkpoint_path)
+        gap_assign_cache = _load_checkpoint(checkpoint_path, track_ops)
 
     for plane_j in range(track_ops.nplanes):
 
@@ -558,7 +681,7 @@ def add_anchor_agnostic_chains(all_pl_match_mat, all_ds_all_roi_ref, all_ds_all_
                 mov_img = track_ops.all_ds_avg_ch1[k][plane_j]
                 ref_ind, reg_ind = _assign_pair(roi_ref_raw, roi_mov_raw, ref_img, mov_img, track_ops)
                 gap_assign_cache[key] = [ref_ind, reg_ind]
-                _save_checkpoint(checkpoint_path, gap_assign_cache)
+                _save_checkpoint(checkpoint_path, gap_assign_cache, track_ops)
                 if verbose:
                     print(f'  [fix2] registered session {i} -> session {k} directly (plane {plane_j}): '
                           f'{len(ref_ind)} matches above threshold')
@@ -656,7 +779,7 @@ def run_t2p_gap_tolerant(track_ops, max_gap=3, n_workers=1, anchor_agnostic_seed
     check_nplanes(track_ops)
 
     timing_ckpt_path = _timing_checkpoint_path(track_ops)
-    timing_ckpt = _load_timing_checkpoint(timing_ckpt_path)
+    timing_ckpt = _load_timing_checkpoint(timing_ckpt_path, track_ops)
     prior_precompute_elapsed = timing_ckpt.get('precompute_elapsed', 0.0)
     prior_chain_elapsed = timing_ckpt.get('chain_elapsed', 0.0)
     resumed_from_prior_attempt = prior_precompute_elapsed > 0 or prior_chain_elapsed > 0
@@ -701,7 +824,7 @@ def run_t2p_gap_tolerant(track_ops, max_gap=3, n_workers=1, anchor_agnostic_seed
                                        max_gap=max_gap, n_workers=n_workers)
         precompute_elapsed = time.monotonic() - precompute_start
         timing_ckpt['precompute_elapsed'] = prior_precompute_elapsed + precompute_elapsed
-        _save_timing_checkpoint(timing_ckpt_path, timing_ckpt)
+        _save_timing_checkpoint(timing_ckpt_path, timing_ckpt, track_ops)
         print(f'[gap] parallel precompute finished in {precompute_elapsed:.1f}s this attempt '
               f'({n_workers} workers, max_gap={max_gap})'
               + (f' -- {timing_ckpt["precompute_elapsed"]:.1f}s cumulative on this save_path'
@@ -713,7 +836,7 @@ def run_t2p_gap_tolerant(track_ops, max_gap=3, n_workers=1, anchor_agnostic_seed
         all_ds_all_roi_ref, all_ds_all_roi_mov, all_ds_assign_thr, track_ops, max_gap=max_gap)
     chain_elapsed = time.monotonic() - chain_start
     timing_ckpt['chain_elapsed'] = prior_chain_elapsed + chain_elapsed
-    _save_timing_checkpoint(timing_ckpt_path, timing_ckpt)
+    _save_timing_checkpoint(timing_ckpt_path, timing_ckpt, track_ops)
     print(f'[gap] chaining step finished in {chain_elapsed:.1f}s this attempt '
           f'({"warm cache from precompute above" if precompute_elapsed is not None else "lazy, sequential gap registration as needed"})'
           + (f' -- {timing_ckpt["chain_elapsed"]:.1f}s cumulative on this save_path'
