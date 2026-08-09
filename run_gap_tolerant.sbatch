@@ -8,7 +8,7 @@
 #SBATCH --mem=32G
 #SBATCH --nodes=1               ### number of nodes to use
 #SBATCH --ntasks-per-node=1     ### number of tasks to launch per node
-#SBATCH --time=04:00:00
+#SBATCH --time=24:00:00
 
 # activate your env, e.g.:
 source "$(conda info --base)/etc/profile.d/conda.sh"
