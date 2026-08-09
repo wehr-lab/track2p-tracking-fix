@@ -11,6 +11,6 @@
 #SBATCH --time=23:00:00
 #SBATCH --output=/projects/wehrlab/wehr/batchlogs/copy_2P_data_%j.log
 
-rsync -avP  /scratch/wehrlab/2P5XFAD/wehr5408/gap1 wehr@wehr-nas.uoregon.edu:/share/Projects/2P5XFAD/DriftOutput/wehr5408
+rsync -avP  /scratch/wehrlab/2P5XFAD/wehr5408/gap1* wehr@wehr-nas.uoregon.edu:/share/Projects/2P5XFAD/DriftOutput/wehr5408
 
 
