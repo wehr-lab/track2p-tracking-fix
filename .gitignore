@@ -6,6 +6,6 @@ __pycache__/
 *.pptx
 elastix_params.txt
 local_machine.cfg
-run_exclude_session_settings.py	
-run_gap_tolerant_settings.py	
+run_exclude_session_settings.py
+run_gap_tolerant_settings.py
 track2p_settings.cfg

@@ -18,6 +18,9 @@ One-time setup -- generate a .cfg from a known-good existing run:
 
     python track_ops_config.py --export "/path/to/existing/track2p/track_ops.npy" track2p_settings.cfg
 
+    example:
+    python track_ops_config.py --export "/Volumes/Projects/2P5XFAD/DriftOutput/wehr5917/gap3sc-pre/track2p/track_ops.npy" track2p_settings.cfg
+
 After that, edit track2p_settings.cfg by hand if you ever need to change a
 setting, and every launcher script just does:
 
