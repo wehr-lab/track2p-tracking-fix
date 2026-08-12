@@ -58,7 +58,10 @@ def sharpness_metric(img):
     return float(np.var(ndimage.laplace(img.astype(np.float64))))
 
 
-def main():
+def main(argv=None):
+    """argv=None (default) parses sys.argv, same as always for direct CLI use.
+    Pass an explicit list to call this programmatically -- e.g. screen_and_scan.py
+    invokes this in-process instead of shelling out."""
     parser = argparse.ArgumentParser()
     parser.add_argument('save_path', help='track2p save_path with track_ops.npy')
     parser.add_argument('--plane', type=int, default=0)
@@ -68,7 +71,7 @@ def main():
     parser.add_argument('--match-rate-mads', type=float, default=1.5,
                          help='flag a session if ALL its neighboring pairs are this many '
                               'MADs below the median pair match rate (default 1.5)')
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
     plane = args.plane
 
     track_ops = np.load(os.path.join(args.save_path, 'track_ops.npy'), allow_pickle=True).item()

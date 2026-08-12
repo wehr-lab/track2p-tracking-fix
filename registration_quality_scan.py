@@ -74,6 +74,22 @@ inspect_registration_pair.py outputs. Each row shows:
      convention as inspect_registration_pair.py. Well-aligned structures
      appear yellow/white; misaligned structures show up as separated
      red/green fringes.
+  4. IOU histogram for that transition (only if match_diagnostics.npy
+     exists at save_path, i.e. a track2p run -- vanilla or gap-tolerant --
+     already happened here; this script can otherwise run standalone
+     before any track2p run, so this column is a blank "not available yet"
+     placeholder in that case). Otsu/min threshold drawn as a dashed red
+     vertical line, match rate (fraction of candidate IOUs clearing it,
+     same number screen_sessions.py's "neighbor rate" column reports) in
+     the row label. This is a DIFFERENT signal from panels 1-3: SSIM there
+     measures raw image-level alignment before any ROI detection/matching;
+     this measures the downstream IOU distribution ROI matching actually
+     produces. The point of putting it in the same row is to eyeball
+     bimodality (clean separation between a "real match" and "different
+     cell" peak) directly against that pair's image alignment -- a
+     collapsed/unimodal histogram next to an otherwise-fine-looking
+     overlay is a sign the Otsu threshold on that pair can't be trusted
+     even though registration itself looks okay.
 Rows whose SSIM is flagged as a low-alignment outlier get a red row label
 and a red border around their panels, so a bad pair jumps out while
 scrolling the full-list image. Use inspect_registration_pair.py on any
@@ -87,6 +103,10 @@ Usage:
     python registration_quality_scan.py /path/to/track2p/save_path --z-thresh 2.0 --ssim-floor 0.3
     python registration_quality_scan.py /path/to/track2p/save_path --middle-panel mov_reg
     python registration_quality_scan.py /path/to/track2p/save_path --no-grid   # table only, skip the PNG
+
+Also runnable together with screen_sessions.py in one call via
+screen_and_scan.py, since in practice you always want both -- see that
+script's docstring.
 
 IMPORTANT -- which track2p gets imported depends on where you run this
 from; see the same note in run_gap_tolerant.py. The sys.path.insert below
@@ -113,20 +133,30 @@ from registration_qc_utils import (load_mean_img as _load_mean_img, norm01 as _n
                                     masked_ssim, phase_correlation_shift)
 
 
-def _build_grid(pairs_data, labels, scores, z, flagged, z_thresh, ssim_floor, middle_panel, plane, out_path, panel_size, dpi, phase_corr_info=None):
-    """pairs_data[i] = (ref_n, mov_raw_n, mov_reg_n, overlay) for pair i -> i+1."""
+def _build_grid(pairs_data, labels, scores, z, flagged, z_thresh, ssim_floor, middle_panel, plane, out_path, panel_size, dpi, phase_corr_info=None, iou_data=None):
+    """pairs_data[i] = (ref_n, mov_raw_n, mov_reg_n, overlay) for pair i -> i+1.
+
+    iou_data[i] = (iou_arr, thr, rate) or None (no match_diagnostics.npy, or
+    that pair had zero candidate IOUs) -- adds a 4th "IOU histogram" column
+    when iou_data is passed at all (i.e. match_diagnostics.npy existed),
+    even if individual rows within it are None."""
     n_pairs = len(pairs_data)
-    fig, axes = plt.subplots(n_pairs, 3, figsize=(3 * panel_size, n_pairs * panel_size),
+    n_cols = 4 if iou_data is not None else 3
+    fig, axes = plt.subplots(n_pairs, n_cols, figsize=(n_cols * panel_size, n_pairs * panel_size),
                               squeeze=False)
 
     col_titles = ['ref (raw)',
                    'mov, BEFORE reg (raw)' if middle_panel == 'mov_raw' else 'mov, AFTER reg',
                    'overlay: red=ref, green=reg mov']
+    if iou_data is not None:
+        col_titles.append('IOU histogram (match diagnostics)')
 
     for i in range(n_pairs):
         ref_n, mov_raw_n, mov_reg_n, overlay = pairs_data[i]
         mid_n = mov_raw_n if middle_panel == 'mov_raw' else mov_reg_n
-        ax_ref, ax_mid, ax_ov = axes[i]
+        row_axes = axes[i]
+        ax_ref, ax_mid, ax_ov = row_axes[0], row_axes[1], row_axes[2]
+        ax_iou = row_axes[3] if iou_data is not None else None
 
         ax_ref.imshow(ref_n, cmap='gray')
         ax_mid.imshow(mid_n, cmap='gray')
@@ -142,8 +172,24 @@ def _build_grid(pairs_data, labels, scores, z, flagged, z_thresh, ssim_floor, mi
             _, _, ssim_pc, likely_capture_range = phase_corr_info[i]
             if likely_capture_range:
                 row_label += f'\nphase-corr={ssim_pc:.3f}\nCAPTURE-RANGE?'
+        if iou_data is not None and iou_data[i] is not None:
+            _, _, rate = iou_data[i]
+            row_label += f'\nIOU match={rate:.0%}'
         ax_ref.set_ylabel(row_label, rotation=0, ha='right', va='center', fontsize=7.5,
                            color=color, fontweight=weight, labelpad=8)
+
+        if ax_iou is not None:
+            if iou_data[i] is not None:
+                iou_arr, thr, rate = iou_data[i]
+                ax_iou.hist(iou_arr, bins=30, range=(0, 1), color='steelblue', edgecolor='none')
+                ax_iou.axvline(thr, color='red', linestyle='--', linewidth=1.2)
+                ax_iou.set_xlim(0, 1)
+                ax_iou.tick_params(labelsize=6)
+            else:
+                ax_iou.text(0.5, 0.5, 'no IOU data\n(run track2p first)', ha='center', va='center',
+                            fontsize=7.5, color='gray', transform=ax_iou.transAxes)
+                ax_iou.set_xticks([])
+                ax_iou.set_yticks([])
 
         for ax in (ax_ref, ax_mid, ax_ov):
             ax.set_xticks([])
@@ -152,11 +198,17 @@ def _build_grid(pairs_data, labels, scores, z, flagged, z_thresh, ssim_floor, mi
                 for spine in ax.spines.values():
                     spine.set_edgecolor('red')
                     spine.set_linewidth(3)
+        if ax_iou is not None and row_flagged:
+            for spine in ax_iou.spines.values():
+                spine.set_edgecolor('red')
+                spine.set_linewidth(3)
 
         if i == 0:
             ax_ref.set_title(col_titles[0], fontsize=9)
             ax_mid.set_title(col_titles[1], fontsize=9)
             ax_ov.set_title(col_titles[2], fontsize=9)
+            if ax_iou is not None:
+                ax_iou.set_title(col_titles[3], fontsize=9)
 
     n_flagged = int(np.sum(flagged))
     fig.suptitle(f'registration_quality_scan.py -- plane {plane} -- {n_pairs} pair(s), '
@@ -168,7 +220,10 @@ def _build_grid(pairs_data, labels, scores, z, flagged, z_thresh, ssim_floor, mi
     return out_path
 
 
-def main():
+def main(argv=None):
+    """argv=None (default) parses sys.argv, same as always for direct CLI use.
+    Pass an explicit list to call this programmatically -- e.g. screen_and_scan.py
+    invokes this in-process instead of shelling out."""
     parser = argparse.ArgumentParser()
     parser.add_argument('save_path', help='track2p save_path containing track_ops.npy')
     parser.add_argument('--plane', type=int, default=0)
@@ -193,7 +248,7 @@ def main():
                          help='output PNG path for the grid (default: <save_path>/diagnostics/registration_quality_grid.png)')
     parser.add_argument('--panel-size', type=float, default=3.2, help='inches per panel (default 3.2)')
     parser.add_argument('--dpi', type=int, default=100, help='grid PNG dpi (default 100)')
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
 
     track_ops = DefaultTrackOps()
     track_ops_dict = np.load(os.path.join(args.save_path, 'track_ops.npy'), allow_pickle=True).item()
@@ -210,11 +265,27 @@ def main():
     n_sessions = len(all_ds_path)
     labels = [os.path.basename(os.path.normpath(p)) for p in all_ds_path]
 
+    # IOU diagnostics are a separate, downstream signal from this script's own SSIM
+    # registration -- only available if a track2p run (vanilla or gap-tolerant) already
+    # happened at this save_path. Same file/keys screen_sessions.py and
+    # estimate_fix2_ceiling.py already read: iou_values[pair][plane] -> array,
+    # thresholds[pair][plane] -> float.
+    diag_path = os.path.join(args.save_path, 'match_diagnostics.npy')
+    iou_values = thresholds = None
+    if os.path.exists(diag_path):
+        diag = np.load(diag_path, allow_pickle=True).item()
+        iou_values = diag['iou_values']
+        thresholds = diag['thresholds']
+    else:
+        print(f'(no match_diagnostics.npy at {args.save_path} -- IOU histogram column will show '
+              f'"no IOU data" placeholders; run track2p at least once here to unlock it)\n')
+
     print(f'Registering {n_sessions - 1} consecutive pair(s), plane {args.plane} -- this runs real '
           f'elastix registration for each, same cost as a normal run\'s consecutive pass...\n')
 
     scores = []
     pairs_data = []  # (ref_n, mov_raw_n, mov_reg_n, overlay) per pair, only kept if grid is being built
+    iou_data = [] if iou_values is not None else None  # (iou_arr, thr, rate) or None, per pair
     for i in range(n_sessions - 1):
         ref_img = _load_mean_img(all_ds_path[i], args.plane)
         mov_img = _load_mean_img(all_ds_path[i + 1], args.plane)
@@ -224,7 +295,18 @@ def main():
         mov_reg_n = _norm01(mov_img_reg)
         score = masked_ssim(ref_n, mov_reg_n, mask)
         scores.append(score)
-        print(f'  [{i + 1}/{n_sessions - 1}] {labels[i]} -> {labels[i + 1]}: SSIM={score:.3f}')
+
+        iou_str = ''
+        if iou_values is not None:
+            iou_arr = np.asarray(iou_values[i][args.plane])
+            thr = thresholds[i][args.plane]
+            if len(iou_arr) > 0:
+                rate = float(np.mean(iou_arr >= thr))
+                iou_data.append((iou_arr, thr, rate))
+                iou_str = f'  IOU match={rate:.1%}'
+            else:
+                iou_data.append(None)
+        print(f'  [{i + 1}/{n_sessions - 1}] {labels[i]} -> {labels[i + 1]}: SSIM={score:.3f}{iou_str}')
 
         if not args.no_grid:
             mov_raw_n = _norm01(mov_img)
@@ -235,7 +317,11 @@ def main():
 
     z = robust_z(scores)
 
-    print(f'\n{"pair":>12}  {"ref":<16} {"mov":<16} {"SSIM":>7} {"z":>6}  flag')
+    header = f'\n{"pair":>12}  {"ref":<16} {"mov":<16} {"SSIM":>7} {"z":>6}'
+    if iou_data is not None:
+        header += f' {"IOU match":>10}'
+    header += '  flag'
+    print(header)
     flagged = np.zeros(n_sessions - 1, dtype=bool)
     suspects = []
     for i in range(n_sessions - 1):
@@ -251,7 +337,11 @@ def main():
                 reasons.append('abs-floor')
             flag = f'<-- LOW_ALIGNMENT ({"+".join(reasons)})'
             suspects.append((i, i + 1, labels[i], labels[i + 1], scores[i], z[i], reasons))
-        print(f'  {i:>3}->{i+1:<3}  {labels[i]:<16} {labels[i+1]:<16} {scores[i]:>7.3f} {z[i]:>6.1f}  {flag}')
+        row = f'  {i:>3}->{i+1:<3}  {labels[i]:<16} {labels[i+1]:<16} {scores[i]:>7.3f} {z[i]:>6.1f}'
+        if iou_data is not None:
+            row += f' {iou_data[i][2]:>9.1%}' if iou_data[i] is not None else f' {"n/a":>9}'
+        row += f'  {flag}'
+        print(row)
 
     print('\n' + '=' * 70)
     if suspects:
@@ -298,11 +388,18 @@ def main():
         out_path = args.grid_out if args.grid_out is not None else os.path.join(
             args.save_path, 'diagnostics', 'registration_quality_grid.png')
         _build_grid(pairs_data, labels, scores, z, flagged, args.z_thresh, args.ssim_floor, args.middle_panel,
-                    args.plane, out_path, args.panel_size, args.dpi, phase_corr_info)
+                    args.plane, out_path, args.panel_size, args.dpi, phase_corr_info, iou_data)
         print(f'\nSaved grid PNG: {os.path.abspath(out_path)}')
-        print('One row per pair -- ref / mov-before-reg / overlay by default (--middle-panel mov_reg to swap the '
-              'middle column). Flagged rows (|z| >= threshold OR SSIM <= floor) have a red label and red panel '
-              'borders; rows with a likely capture-range failure additionally note it in the label.')
+        print('One row per pair -- ref / mov-before-reg / overlay' +
+              (' / IOU histogram' if iou_data is not None else '') +
+              ' by default (--middle-panel mov_reg to swap the middle column). Flagged rows (|z| >= threshold OR '
+              'SSIM <= floor) have a red label and red panel borders; rows with a likely capture-range failure '
+              'additionally note it in the label.')
+        if iou_data is not None:
+            print('IOU histogram column: dashed red line is the Otsu/min threshold for that pair. Eyeball for '
+                  'bimodality -- a clean split between a low "different cell" peak and a high "real match" peak '
+                  'means the threshold can be trusted; a collapsed/unimodal histogram means it can\'t, even on a '
+                  'pair whose SSIM/overlay look fine.')
 
 
 if __name__ == '__main__':
