@@ -48,15 +48,47 @@ index values.
 Usage:
     python export_match_mat_for_matlab.py /path/to/track2p_save_path --plane 0
 
+    # Same run's data, but this computer mounts it somewhere else than the
+    # computer track2p originally ran on (e.g. track2p ran against
+    # /scratch/wehrlab/2P5XFAD/... on the acquisition machine; here that
+    # mouse's data is only reachable via a NAS mount):
+    python export_match_mat_for_matlab.py /path/to/track2p_save_path --plane 0 \
+        --path-remap /scratch/wehrlab/2P5XFAD=/Volumes/wehrlab/2P5XFAD
+
 Looks for <save_path>/plane{j}_match_mat.npy and <save_path>/track_ops.npy
 (for all_ds_path and iscell_thr), writes <save_path>/plane{j}_match_mat.mat
 alongside them by default.
+
+PATH REMAPPING (--path-remap): track_ops.npy's all_ds_path is whatever
+absolute paths were in scope on the computer that ran run_gap_tolerant.py
+-- baked in at track2p run time, not re-derived here. Running this script
+on a DIFFERENT computer (e.g. BuildResponseTensor.m calling it via
+cfg.pythonBin/system() from your laptop, when track2p itself ran on a
+rig/analysis machine with different mount points for the same underlying
+data -- 2026-08-13, wehr5659) means those baked-in paths may not exist
+locally even though the same session data is reachable via a different
+mount (a NAS path here, vs. local /scratch there). --path-remap OLD=NEW
+(repeatable) rewrites any all_ds_path entry starting with OLD to start
+with NEW instead, BEFORE either reading iscell.npy/F.npy for the
+match_mat translation below or writing session_paths into the output
+.mat -- so BuildResponseTensor.m (which reads F.npy/Fneu.npy straight
+from session_paths) gets already-correct paths for this computer without
+needing its own separate remap logic. See DriftConfig.m's cfg.pathRemap.
 """
 
 import os
 import argparse
 import numpy as np
 from scipy.io import savemat
+
+
+def remap_path(path, remaps):
+    """remaps: list of (old_prefix, new_prefix) tuples, checked in order --
+    first prefix match wins. Returns `path` unchanged if none match."""
+    for old_prefix, new_prefix in remaps:
+        if path.startswith(old_prefix):
+            return new_prefix + path[len(old_prefix):]
+    return path
 
 
 def get_iscell_valid_indices(iscell, iscell_thr):
@@ -93,7 +125,21 @@ def main():
     parser.add_argument('--plane', type=int, default=0)
     parser.add_argument('--out', default=None,
                          help='output path (default: <save_path>/plane{j}_match_mat.mat)')
+    parser.add_argument('--path-remap', action='append', default=[],
+                         metavar='OLD_PREFIX=NEW_PREFIX',
+                         help='Rewrite all_ds_path entries starting with OLD_PREFIX to start with '
+                              'NEW_PREFIX instead (repeatable). Use when this session\'s track_ops.npy '
+                              'was written on a different computer than this one, with a different '
+                              'mount point for the same underlying data -- see the module docstring.')
     args = parser.parse_args()
+
+    remaps = []
+    for spec in args.path_remap:
+        if '=' not in spec:
+            raise SystemExit(
+                f'--path-remap expects OLD_PREFIX=NEW_PREFIX, got {spec!r} (no \'=\' found).')
+        old_prefix, new_prefix = spec.split('=', 1)
+        remaps.append((old_prefix, new_prefix))
 
     in_path = os.path.join(args.save_path, f'plane{args.plane}_match_mat.npy')
     match_mat = np.load(in_path, allow_pickle=True)
@@ -102,6 +148,17 @@ def main():
     track_ops = np.load(track_ops_path, allow_pickle=True).item()
     all_ds_path = list(track_ops['all_ds_path'])
     iscell_thr = track_ops.get('iscell_thr', None)
+
+    if remaps:
+        remapped = [remap_path(p, remaps) for p in all_ds_path]
+        n_changed = sum(1 for old, new in zip(all_ds_path, remapped) if old != new)
+        print(f'--path-remap: rewrote {n_changed}/{len(all_ds_path)} session path(s):')
+        for old, new in zip(all_ds_path, remapped):
+            if old != new:
+                print(f'  {old}\n  -> {new}')
+        if n_changed == 0:
+            print('  (no all_ds_path entry matched any given OLD_PREFIX -- check for a typo.)')
+        all_ds_path = remapped
 
     n_cells, n_sessions = match_mat.shape
     if len(all_ds_path) != n_sessions:
