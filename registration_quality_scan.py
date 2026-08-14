@@ -211,7 +211,7 @@ def _build_grid(pairs_data, labels, scores, z, flagged, z_thresh, ssim_floor, mi
                 ax_iou.set_title(col_titles[3], fontsize=9)
 
     n_flagged = int(np.sum(flagged))
-    fig.suptitle(f'registration_quality_scan.py {save_path} -- plane {plane} -- {n_pairs} pair(s), '
+    fig.suptitle(f'registration_quality_scan.py {out_path} -- plane {plane} -- {n_pairs} pair(s), '
                  f'{n_flagged} flagged (red) at |z|>={z_thresh} or SSIM<={ssim_floor}', fontsize=11, y=1.0)
     plt.tight_layout(rect=[0, 0, 1, 0.99])
     os.makedirs(os.path.dirname(out_path), exist_ok=True)
